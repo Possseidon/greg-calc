@@ -11,7 +11,9 @@
                 ]
             ]
         },
-        "machines": {}
+        "machines": {
+            "1": 1
+        }
     },
     {
         "recipe": {
@@ -43,7 +45,9 @@
                 ]
             ]
         },
-        "machines": {}
+        "machines": {
+            "1": 1
+        }
     },
     {
         "recipe": {
@@ -71,7 +75,9 @@
                 ]
             ]
         },
-        "machines": {}
+        "machines": {
+            "1": 1
+        }
     },
     {
         "recipe": {
@@ -102,6 +108,8 @@
                 ]
             ]
         },
-        "machines": {}
+        "machines": {
+            "1": 1
+        }
     }
 ]

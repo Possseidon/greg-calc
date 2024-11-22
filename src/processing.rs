@@ -1,4 +1,3 @@
-pub mod cache;
 pub mod ui;
 
 use std::collections::BTreeMap;
@@ -26,10 +25,6 @@ impl ProcessingChain {
     ///
     /// Additionally, any [`Recipe`]s producing a [`Product`] matching the `allow_overproduction`
     /// predicate will not be slowed down due to consuming machines not being able to keep up.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `recipes` does not contain all recipes that are used by the machines.
     pub fn speeds(&self, allow_overproduction: impl Fn(&Product) -> bool) -> Speeds {
         let mut speeds = Speeds {
             machines: self
