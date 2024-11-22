@@ -1,0 +1,107 @@
+[
+    {
+        "recipe": {
+            "machine": "Oil Drilling Rig",
+            "ticks": 20,
+            "eu_per_tick": 512,
+            "produced": [
+                [
+                    "Raw Oil",
+                    450
+                ]
+            ]
+        },
+        "machines": {}
+    },
+    {
+        "recipe": {
+            "machine": "Distillation Tower",
+            "ticks": 20,
+            "eu_per_tick": 512,
+            "consumed": [
+                [
+                    "Raw Oil",
+                    100
+                ]
+            ],
+            "produced": [
+                [
+                    "Sulfuric Gas",
+                    60
+                ],
+                [
+                    "Sulfuric Heavy Fuel",
+                    10
+                ],
+                [
+                    "Sulfuric Light Fuel",
+                    50
+                ],
+                [
+                    "Sulfuric Naptha",
+                    15
+                ]
+            ]
+        },
+        "machines": {}
+    },
+    {
+        "recipe": {
+            "machine": "Chemical Reactor",
+            "ticks": 160,
+            "eu_per_tick": 512,
+            "consumed": [
+                [
+                    "Sulfuric Gas",
+                    16000
+                ],
+                [
+                    "Hydrogen Gas",
+                    2000
+                ]
+            ],
+            "produced": [
+                [
+                    "Hydrogen Sulfide",
+                    1000
+                ],
+                [
+                    "Refinery Gas",
+                    16000
+                ]
+            ]
+        },
+        "machines": {}
+    },
+    {
+        "recipe": {
+            "machine": "Chemical Reactor",
+            "ticks": 160,
+            "eu_per_tick": 512,
+            "catalysts": [
+                "Programmed Circuit 1"
+            ],
+            "produced": [
+                [
+                    "Oxygen Gas",
+                    3000
+                ],
+                [
+                    "Hydrogen Sulfide",
+                    1000
+                ]
+            ],
+            "consumed": [
+                [
+                    "Water",
+                    1000
+                ],
+                [
+                    "Sulfur Dioxide",
+                    1000
+                ]
+            ]
+        },
+        "machines": {}
+    }
+]
