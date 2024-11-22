@@ -136,8 +136,8 @@ impl ViewMode {
                     | TableColumn::ConsumedCount
                     | TableColumn::Produced
                     | TableColumn::ProducedCount
-                    | TableColumn::Eu
                     | TableColumn::ProcessingTime
+                    | TableColumn::Eu
                     | TableColumn::TotalEu
             ],
             Self::Configuration => enum_set![
@@ -188,57 +188,57 @@ enum TableColumn {
     ConsumedCount,
     Produced,
     ProducedCount,
-    Eu,
     ProcessingTime,
+    Eu,
     TotalEu,
 }
 
 impl TableColumn {
     fn header(self, view_mode: ViewMode) -> &'static str {
         match self {
-            TableColumn::Machine => "Machine",
-            TableColumn::Catalysts => "Catalysts",
-            TableColumn::Configuration => "Configuration",
-            TableColumn::Speed => "Speed",
-            TableColumn::Consumed => "Consumed",
-            TableColumn::ConsumedCount => view_mode.count_header(),
-            TableColumn::Produced => "Produced",
-            TableColumn::ProducedCount => view_mode.count_header(),
-            TableColumn::TotalEu => "Total EU",
-            TableColumn::ProcessingTime => "Processing Time",
-            TableColumn::Eu => "EU/tick",
+            Self::Machine => "Machine",
+            Self::Catalysts => "Catalysts",
+            Self::Configuration => "Configuration",
+            Self::Speed => "Speed",
+            Self::Consumed => "Consumed",
+            Self::ConsumedCount => view_mode.count_header(),
+            Self::Produced => "Produced",
+            Self::ProducedCount => view_mode.count_header(),
+            Self::ProcessingTime => "Processing Time",
+            Self::Eu => "EU/tick",
+            Self::TotalEu => "Total EU",
         }
     }
 
     fn header_hover(self, view_mode: ViewMode) -> &'static str {
         match self {
-            TableColumn::Machine => "The kind of machine processing this recipe.",
-            TableColumn::Catalysts => "Products that are required but not consumed.",
-            TableColumn::Consumed | TableColumn::ConsumedCount => match view_mode {
+            Self::Machine => "The kind of machine processing this recipe.",
+            Self::Catalysts => "Products that are required but not consumed.",
+            Self::Configuration => "The machines processing this recipe.",
+            Self::Speed => "How fast this machine can run.",
+            Self::Consumed | Self::ConsumedCount => match view_mode {
                 ViewMode::Recipe => "Consumed products per processing cycle.",
                 ViewMode::Configuration => "Consumed products by all machines.",
                 ViewMode::Speed => "Consumed products at the current speed.",
             },
-            TableColumn::Produced | TableColumn::ProducedCount => match view_mode {
+            Self::Produced | Self::ProducedCount => match view_mode {
                 ViewMode::Recipe => "Produced products per processing cycle.",
                 ViewMode::Configuration => "Produced procuts by all machines.",
                 ViewMode::Speed => "Produced products at the current speed.",
             },
-            TableColumn::TotalEu => "Total EU per processing cycle.",
-            TableColumn::ProcessingTime => "Duration of a single processing cycle.",
-            TableColumn::Eu => match view_mode {
+            Self::ProcessingTime => "Duration of a single processing cycle.",
+            Self::Eu => match view_mode {
                 ViewMode::Recipe => "EU/t for a single machine without overclocking.",
                 ViewMode::Configuration => "EU/t of all machines.",
                 ViewMode::Speed => "EU/t at the current speed.",
             },
-            TableColumn::Configuration => "The machines processing this recipe.",
-            TableColumn::Speed => "How fast this machine can run.",
+            Self::TotalEu => "Total EU per processing cycle.",
         }
     }
 
     fn table_builder_column(self) -> Column {
         match self {
-            TableColumn::ConsumedCount | TableColumn::ProducedCount => Column::auto(),
+            Self::ConsumedCount | Self::ProducedCount => Column::auto(),
             _ => Column::auto().resizable(true),
         }
     }
@@ -330,6 +330,9 @@ impl TableRow {
                             )
                         })
                         .unwrap_or_default(),
+                    TableColumn::ProcessingTime => first
+                        .then(|| format!("{:.2} sec", (recipe.ticks as f64) / 20.0))
+                        .unwrap_or_default(),
                     TableColumn::Eu => first
                         .then(|| {
                             format_eu(
@@ -339,9 +342,6 @@ impl TableRow {
                                 speeds.machines[recipe],
                             )
                         })
-                        .unwrap_or_default(),
-                    TableColumn::ProcessingTime => first
-                        .then(|| format!("{:.2} sec", (recipe.ticks as f64) / 20.0))
                         .unwrap_or_default(),
                     TableColumn::TotalEu => first
                         .then(|| recipe.total_eu().to_string())
@@ -377,9 +377,9 @@ impl TableRow {
                     TableColumn::ConsumedCount => "TODO".to_string(),
                     TableColumn::Produced => "TODO".to_string(),
                     TableColumn::ProducedCount => "TODO".to_string(),
-                    TableColumn::TotalEu => "TODO".to_string(),
                     TableColumn::ProcessingTime => "TODO".to_string(),
                     TableColumn::Eu => "TODO".to_string(),
+                    TableColumn::TotalEu => "TODO".to_string(),
                 })),
             })
         }))
