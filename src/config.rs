@@ -1,8 +1,9 @@
-use std::{collections::BTreeMap, num::NonZeroU64};
+use std::{fmt::Display, num::NonZeroU64};
 
-use itertools::Itertools;
 use num_rational::Rational64;
 use serde::{Deserialize, Serialize};
+
+use crate::processing::Overclocking;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -20,7 +21,7 @@ pub struct Product {
 #[serde(deny_unknown_fields)]
 pub struct Recipe {
     pub machine: Machine,
-    pub ticks: u64,
+    pub ticks: NonZeroU64,
     #[serde(default)]
     pub eu_per_tick: i64,
     #[serde(default)]
@@ -65,10 +66,15 @@ impl Recipe {
     }
 
     pub fn total_eu(&self) -> i64 {
-        i64::try_from(self.ticks).unwrap() * self.eu_per_tick
+        i64::try_from(self.ticks.get()).unwrap() * self.eu_per_tick
+    }
+
+    pub fn seconds(&self) -> Rational64 {
+        Rational64::new(self.ticks.get().try_into().unwrap(), 20)
     }
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Voltage {
     /// Up to `8EU/t`.
     UltraLow,
@@ -86,8 +92,8 @@ pub enum Voltage {
 }
 
 impl Voltage {
-    pub const fn from_eu_per_tick(eu_per_tick: NonZeroU64) -> Self {
-        match (eu_per_tick.ilog2() - 3).div_ceil(2) {
+    pub const fn from_index(index: u8) -> Self {
+        match index {
             0 => Self::UltraLow,
             1 => Self::Low,
             2 => Self::Medium,
@@ -95,6 +101,15 @@ impl Voltage {
             4 => Self::Extreme,
             _ => Self::Max,
         }
+    }
+
+    pub fn from_eu_per_tick(eu_per_tick: NonZeroU64) -> Self {
+        Self::from_index(
+            (eu_per_tick.ilog2() - 3)
+                .div_ceil(2)
+                .try_into()
+                .unwrap_or(u8::MAX),
+        )
     }
 
     pub const fn max_eu_per_tick(self) -> NonZeroU64 {
@@ -108,6 +123,23 @@ impl Voltage {
             eu_per_tick
         } else {
             panic!("should not overflow");
+        }
+    }
+
+    pub fn with_overclocking(self, overclocking: Overclocking) -> Self {
+        Self::from_index((self as u8).saturating_add_signed(overclocking.0))
+    }
+}
+
+impl Display for Voltage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Voltage::UltraLow => write!(f, "ULV"),
+            Voltage::Low => write!(f, "LV"),
+            Voltage::Medium => write!(f, "MV"),
+            Voltage::High => write!(f, "HV"),
+            Voltage::Extreme => write!(f, "EV"),
+            Voltage::Max => write!(f, "MAX"),
         }
     }
 }

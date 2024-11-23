@@ -10,11 +10,11 @@ use crate::config::{Product, Recipe};
 #[derive(Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ProcessingChain {
-    pub machines: Vec<MachineConfiguration>,
+    pub machines: Vec<Setup>,
 }
 
 impl ProcessingChain {
-    /// Calculates how fast each [`MachineConfiguration`] is running.
+    /// Calculates how fast each [`Setup`] is running.
     ///
     /// At least one of the recipes will run at regular speed, i.e. `100%`. Other recipes will
     /// slow down due to either not having enough input from previous recipes or producing more than
@@ -30,12 +30,12 @@ impl ProcessingChain {
             machines: self
                 .machines
                 .iter()
-                .map(|machine_configuration| (machine_configuration.recipe.clone(), 1.into()))
+                .map(|setup| (setup.recipe.clone(), 1.into()))
                 .collect(),
         };
 
-        while let Some((product, ProductPerTick { consumed, produced })) = self
-            .products_with_speeds(&speeds)
+        while let Some((product, ProductPerSecond { consumed, produced })) = self
+            .products(&speeds)
             .products
             .iter()
             .filter(|(_, product_per_tick)| {
@@ -64,30 +64,8 @@ impl ProcessingChain {
         speeds
     }
 
-    /// Returns the total [`ProductsPerTick`] with a single non-overclocked machine for each recipe.
-    ///
-    /// All returned values are guaranteed to be integers.
-    pub fn products(&self) -> ProductsPerTick {
-        self.machines
-            .iter()
-            .fold(Default::default(), |mut acc, machine_configuration| {
-                for (product, count) in machine_configuration.recipe.products() {
-                    acc.products.entry(product.clone()).or_default().add(count);
-                }
-
-                acc.eu.add(machine_configuration.recipe.eu_per_tick.into());
-
-                acc
-            })
-    }
-
-    /// Returns the total [`ProductsPerTick`] assuming all machines are running at normal speed.
-    pub fn products_with_configuration(&self) -> ProductsPerTick {
-        self.products_with_speed_callback(|_| Rational64::ONE)
-    }
-
     /// Returns the total [`ProductsPerTick`] assuming recipes are running at the given `speeds`.
-    pub fn products_with_speeds(&self, speeds: &Speeds) -> ProductsPerTick {
+    pub fn products(&self, speeds: &Speeds) -> Products {
         self.products_with_speed_callback(|recipe| speeds.machines[recipe])
     }
 
@@ -95,25 +73,23 @@ impl ProcessingChain {
     fn products_with_speed_callback(
         &self,
         recipe_speed: impl Fn(&Recipe) -> Rational64,
-    ) -> ProductsPerTick {
+    ) -> Products {
         self.machines
             .iter()
-            .fold(Default::default(), |mut acc, machine_configuration| {
-                let speed = recipe_speed(&machine_configuration.recipe);
+            .fold(Default::default(), |mut acc, setup| {
+                let recipe = &setup.recipe;
+                let speed = recipe_speed(recipe);
 
-                let speed_factor = machine_configuration.speed_factor();
-                for (product, count) in machine_configuration.recipe.products() {
+                let speed_factor = setup.speed_factor();
+                let seconds = recipe.seconds();
+                for (product, count) in recipe.products() {
                     acc.products
                         .entry(product.clone())
                         .or_default()
-                        .add(speed_factor * count * speed);
+                        .add(speed_factor * count * speed / seconds);
                 }
 
-                acc.eu.add(
-                    machine_configuration.eu_factor()
-                        * machine_configuration.recipe.eu_per_tick
-                        * speed,
-                );
+                acc.eu_per_tick += setup.eu_factor() * recipe.eu_per_tick * speed;
 
                 acc
             })
@@ -122,13 +98,13 @@ impl ProcessingChain {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MachineConfiguration {
+pub struct Setup {
     pub recipe: Recipe,
     pub machines: BTreeMap<Overclocking, u32>,
 }
 
-impl MachineConfiguration {
-    /// How fast this [`MachineConfiguration`] can process recipes.
+impl Setup {
+    /// How fast this [`Setup`] can process recipes.
     pub fn speed_factor(&self) -> Rational64 {
         self.machines
             .iter()
@@ -136,7 +112,7 @@ impl MachineConfiguration {
             .sum()
     }
 
-    /// How much more EU this [`MachineConfiguration`] uses.
+    /// How much more EU this [`Setup`] uses.
     pub fn eu_factor(&self) -> Rational64 {
         self.machines
             .iter()
@@ -171,23 +147,23 @@ pub struct Speeds {
 
 #[derive(Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProductsPerTick {
-    pub eu: ProductPerTick,
-    pub products: BTreeMap<Product, ProductPerTick>,
+pub struct Products {
+    pub eu_per_tick: Rational64,
+    pub products: BTreeMap<Product, ProductPerSecond>,
 }
 
 #[derive(
     Clone, Copy, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
 )]
 #[serde(deny_unknown_fields)]
-pub struct ProductPerTick {
+pub struct ProductPerSecond {
     /// Always positive.
     consumed: Rational64,
     /// Always positive.
     produced: Rational64,
 }
 
-impl ProductPerTick {
+impl ProductPerSecond {
     pub fn total(self) -> Rational64 {
         self.produced - self.consumed
     }

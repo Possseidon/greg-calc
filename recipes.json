@@ -12,7 +12,7 @@
             ]
         },
         "machines": {
-            "1": 1
+            "-2": 1
         }
     },
     {
@@ -46,7 +46,7 @@
             ]
         },
         "machines": {
-            "1": 1
+            "0": 1
         }
     },
     {
@@ -76,40 +76,7 @@
             ]
         },
         "machines": {
-            "1": 1
-        }
-    },
-    {
-        "recipe": {
-            "machine": "Chemical Reactor",
-            "ticks": 160,
-            "eu_per_tick": 512,
-            "catalysts": [
-                "Programmed Circuit 1"
-            ],
-            "produced": [
-                [
-                    "Oxygen Gas",
-                    3000
-                ],
-                [
-                    "Hydrogen Sulfide",
-                    1000
-                ]
-            ],
-            "consumed": [
-                [
-                    "Water",
-                    1000
-                ],
-                [
-                    "Sulfur Dioxide",
-                    1000
-                ]
-            ]
-        },
-        "machines": {
-            "1": 1
+            "0": 1
         }
     }
 ]

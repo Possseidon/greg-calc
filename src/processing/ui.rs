@@ -12,7 +12,7 @@ use enumset::{enum_set, EnumSet, EnumSetType};
 use num_rational::Rational64;
 use num_traits::ToPrimitive;
 
-use super::{MachineConfiguration, ProcessingChain, Speeds};
+use super::{ProcessingChain, Setup, Speeds};
 use crate::config::Product;
 
 pub struct ProcessingChainViewer<'a> {
@@ -75,7 +75,7 @@ impl Widget for ProcessingChainViewer<'_> {
                             for column in columns {
                                 row.col(|ui| {
                                     match &rows[index] {
-                                        TableRow::Columns { texts } => ui.strong(&texts[column]),
+                                        TableRow::Columns { texts } => ui.label(&texts[column]),
                                         TableRow::Separator => {
                                             ui.add(Separator::default().horizontal())
                                         }
@@ -94,7 +94,7 @@ impl Widget for ProcessingChainViewer<'_> {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Enum)]
 pub enum ViewMode {
     Recipe,
-    Configuration,
+    Setup,
     Speed,
 }
 
@@ -102,7 +102,7 @@ impl ViewMode {
     const fn count_header(self) -> &'static str {
         match self {
             ViewMode::Recipe => "#",
-            ViewMode::Configuration => "/sec",
+            ViewMode::Setup => "/sec",
             ViewMode::Speed => "/sec",
         }
     }
@@ -110,7 +110,7 @@ impl ViewMode {
     const fn name(self) -> &'static str {
         match self {
             ViewMode::Recipe => "Recipe",
-            ViewMode::Configuration => "Machine Configuration",
+            ViewMode::Setup => "Setup",
             ViewMode::Speed => "Speed",
         }
     }
@@ -118,12 +118,8 @@ impl ViewMode {
     const fn description(self) -> &'static str {
         match self {
             ViewMode::Recipe => "Shows information about only the recipes.",
-            ViewMode::Configuration => {
-                "Shows information based on specific machine configurations."
-            }
-            ViewMode::Speed => {
-                "Shows information based on the speed at which machines are effectively running."
-            }
+            ViewMode::Setup => "Shows information based on specific machine setup.",
+            ViewMode::Speed => "Shows information based on the effective speed of machines.",
         }
     }
 
@@ -140,10 +136,10 @@ impl ViewMode {
                     | TableColumn::Eu
                     | TableColumn::TotalEu
             ],
-            Self::Configuration => enum_set![
+            Self::Setup => enum_set![
                 TableColumn::Machine
                     | TableColumn::Catalysts
-                    | TableColumn::Configuration
+                    | TableColumn::Setup
                     | TableColumn::Consumed
                     | TableColumn::ConsumedCount
                     | TableColumn::Produced
@@ -153,7 +149,7 @@ impl ViewMode {
             Self::Speed => enum_set![
                 TableColumn::Machine
                     | TableColumn::Catalysts
-                    | TableColumn::Configuration
+                    | TableColumn::Setup
                     | TableColumn::Speed
                     | TableColumn::Consumed
                     | TableColumn::ConsumedCount
@@ -169,7 +165,7 @@ impl Widget for &mut ViewMode {
     fn ui(self, ui: &mut Ui) -> Response {
         ui.horizontal(|ui| {
             ui.heading("View Mode");
-            for view_mode in [ViewMode::Recipe, ViewMode::Configuration, ViewMode::Speed] {
+            for view_mode in [ViewMode::Recipe, ViewMode::Setup, ViewMode::Speed] {
                 ui.selectable_value(self, view_mode, view_mode.name())
                     .on_hover_text(view_mode.description());
             }
@@ -182,7 +178,7 @@ impl Widget for &mut ViewMode {
 enum TableColumn {
     Machine,
     Catalysts,
-    Configuration,
+    Setup,
     Speed,
     Consumed,
     ConsumedCount,
@@ -198,7 +194,7 @@ impl TableColumn {
         match self {
             Self::Machine => "Machine",
             Self::Catalysts => "Catalysts",
-            Self::Configuration => "Configuration",
+            Self::Setup => "Setup",
             Self::Speed => "Speed",
             Self::Consumed => "Consumed",
             Self::ConsumedCount => view_mode.count_header(),
@@ -214,22 +210,22 @@ impl TableColumn {
         match self {
             Self::Machine => "The kind of machine processing this recipe.",
             Self::Catalysts => "Products that are required but not consumed.",
-            Self::Configuration => "The machines processing this recipe.",
+            Self::Setup => "The machines processing this recipe.",
             Self::Speed => "How fast this machine can run.",
             Self::Consumed | Self::ConsumedCount => match view_mode {
                 ViewMode::Recipe => "Consumed products per processing cycle.",
-                ViewMode::Configuration => "Consumed products by all machines.",
+                ViewMode::Setup => "Consumed products by all machines.",
                 ViewMode::Speed => "Consumed products at the current speed.",
             },
             Self::Produced | Self::ProducedCount => match view_mode {
                 ViewMode::Recipe => "Produced products per processing cycle.",
-                ViewMode::Configuration => "Produced procuts by all machines.",
+                ViewMode::Setup => "Produced procuts by all machines.",
                 ViewMode::Speed => "Produced products at the current speed.",
             },
             Self::ProcessingTime => "Duration of a single processing cycle.",
             Self::Eu => match view_mode {
                 ViewMode::Recipe => "EU/t for a single machine without overclocking.",
-                ViewMode::Configuration => "EU/t of all machines.",
+                ViewMode::Setup => "EU/t of all machines.",
                 ViewMode::Speed => "EU/t at the current speed.",
             },
             Self::TotalEu => "Total EU per processing cycle.",
@@ -260,15 +256,15 @@ enum TableRow {
 }
 
 impl TableRow {
-    fn from_machine_configuration<'a>(
+    fn from_setup<'a>(
         view_mode: ViewMode,
-        machine_configuration: &'a MachineConfiguration,
+        setup: &'a Setup,
         speeds: &'a Speeds,
     ) -> impl Iterator<Item = Self> + 'a {
-        let recipe = &machine_configuration.recipe;
+        let recipe = &setup.recipe;
 
         let mut first = true;
-        let mut machines = machine_configuration.machines.iter();
+        let mut machines = setup.machines.iter();
         let mut catalysts = recipe.catalysts.iter();
         let mut consumed = recipe.consumed.iter();
         let mut produced = recipe.produced.iter();
@@ -293,14 +289,19 @@ impl TableRow {
                     TableColumn::Catalysts => catalyst
                         .map(|product| product.name.clone())
                         .unwrap_or_default(),
-                    TableColumn::Configuration => machine
-                        .map(|(overclocking, count)| format!("{} x{count}", overclocking.0))
+                    TableColumn::Setup => machine
+                        .map(|(overclocking, count)| {
+                            if let Some(voltage) = recipe.voltage() {
+                                let voltage = voltage.with_overclocking(*overclocking);
+                                format!("{} x{count}", voltage)
+                            } else {
+                                format!("x{count}")
+                            }
+                        })
                         .unwrap_or_default(),
                     TableColumn::Speed => first
                         .then(|| {
-                            let speed = (speeds.machines[&machine_configuration.recipe] * 100)
-                                .to_f64()
-                                .unwrap();
+                            let speed = (speeds.machines[&setup.recipe] * 100).to_f64().unwrap();
                             format!("{speed:.1}%")
                         })
                         .unwrap_or_default(),
@@ -308,37 +309,23 @@ impl TableRow {
                         .map(|(product, _)| product.name.clone())
                         .unwrap_or_default(),
                     TableColumn::ConsumedCount => consumed
-                        .map(|(_, count)| {
-                            format_count(
-                                view_mode,
-                                *count,
-                                machine_configuration.speed_factor(),
-                                speeds.machines[recipe],
-                            )
-                        })
+                        .map(|(_, count)| format_count(view_mode, *count, setup, speeds))
                         .unwrap_or_default(),
                     TableColumn::Produced => produced
                         .map(|(product, _)| product.name.clone())
                         .unwrap_or_default(),
                     TableColumn::ProducedCount => produced
-                        .map(|(_, count)| {
-                            format_count(
-                                view_mode,
-                                *count,
-                                machine_configuration.speed_factor(),
-                                speeds.machines[recipe],
-                            )
-                        })
+                        .map(|(_, count)| format_count(view_mode, *count, setup, speeds))
                         .unwrap_or_default(),
                     TableColumn::ProcessingTime => first
-                        .then(|| format!("{:.2} sec", (recipe.ticks as f64) / 20.0))
+                        .then(|| format!("{:.2} sec", recipe.seconds().to_f64().unwrap()))
                         .unwrap_or_default(),
                     TableColumn::Eu => first
                         .then(|| {
                             format_eu(
                                 view_mode,
                                 recipe.eu_per_tick,
-                                machine_configuration.eu_factor(),
+                                setup.eu_factor(),
                                 speeds.machines[recipe],
                             )
                         })
@@ -351,59 +338,90 @@ impl TableRow {
         }))
     }
 
-    fn total(
-        view_mode: ViewMode,
-        speeds: &Speeds,
-        processing_chain: &ProcessingChain,
-    ) -> impl Iterator<Item = Self> {
-        let products = match view_mode {
-            ViewMode::Recipe => processing_chain.products(),
-            ViewMode::Configuration => processing_chain.products_with_configuration(),
-            ViewMode::Speed => processing_chain.products_with_speeds(speeds),
-        };
+    fn total<'a>(
+        processing_chain: &'a ProcessingChain,
+        speeds: &'a Speeds,
+    ) -> impl Iterator<Item = Self> + 'a {
+        let products = processing_chain.products(speeds);
 
         let mut first = true;
+        let mut consumed = products
+            .products
+            .clone()
+            .into_iter()
+            .map(|(product, product_per_tick)| (product, product_per_tick.total()))
+            .filter(|(_, total)| *total < Rational64::ZERO)
+            .map(|(product, total)| (product, -total));
+        let mut produced = products
+            .products
+            .into_iter()
+            .map(|(product, product_per_tick)| (product, product_per_tick.total()))
+            .filter(|(_, total)| *total > Rational64::ZERO);
 
         once(Self::Separator).chain(iter::from_fn(move || {
             let first = replace(&mut first, false);
+            let consumed = consumed.next();
+            let produced = produced.next();
 
-            first.then(|| Self::Columns {
+            (first || consumed.is_some() || produced.is_some()).then(|| Self::Columns {
                 texts: Box::new(EnumMap::from_fn(|column| match column {
-                    TableColumn::Machine => "Total".to_string(),
+                    TableColumn::Machine => first.then(|| "Total".to_string()).unwrap_or_default(),
                     TableColumn::Catalysts => String::new(),
-                    TableColumn::Configuration => String::new(),
+                    TableColumn::Setup => String::new(),
                     TableColumn::Speed => String::new(),
-                    TableColumn::Consumed => "TODO".to_string(),
-                    TableColumn::ConsumedCount => "TODO".to_string(),
-                    TableColumn::Produced => "TODO".to_string(),
-                    TableColumn::ProducedCount => "TODO".to_string(),
-                    TableColumn::ProcessingTime => "TODO".to_string(),
-                    TableColumn::Eu => "TODO".to_string(),
-                    TableColumn::TotalEu => "TODO".to_string(),
+                    TableColumn::Consumed => consumed
+                        .as_ref()
+                        .map(|(product, _)| product.name.clone())
+                        .unwrap_or_default(),
+                    TableColumn::ConsumedCount => consumed
+                        .as_ref()
+                        .map(|(_, count)| {
+                            let count = count.to_f64().unwrap();
+                            format!("{:.1}", count)
+                        })
+                        .unwrap_or_default(),
+                    TableColumn::Produced => produced
+                        .as_ref()
+                        .map(|(product, _)| product.name.clone())
+                        .unwrap_or_default(),
+                    TableColumn::ProducedCount => produced
+                        .as_ref()
+                        .map(|(_, count)| {
+                            let count = count.to_f64().unwrap();
+                            format!("{:.1}", count)
+                        })
+                        .unwrap_or_default(),
+                    TableColumn::ProcessingTime => String::new(),
+                    TableColumn::Eu => first
+                        .then(|| {
+                            let eu = products.eu_per_tick.to_f64().unwrap();
+                            format!("{eu:.1}")
+                        })
+                        .unwrap_or_default(),
+                    TableColumn::TotalEu => String::new(),
                 })),
             })
         }))
     }
 }
 
-fn format_count(
-    view_mode: ViewMode,
-    count: NonZeroU64,
-    configuration_speed_factor: Rational64,
-    speed: Rational64,
-) -> String {
+fn format_count(view_mode: ViewMode, count: NonZeroU64, setup: &Setup, speeds: &Speeds) -> String {
     match view_mode {
         ViewMode::Recipe => count.to_string(),
-        ViewMode::Configuration => {
-            let count = (configuration_speed_factor * i64::try_from(count.get()).unwrap())
-                .to_f64()
-                .unwrap();
+        ViewMode::Setup => {
+            let count = (setup.speed_factor() * i64::try_from(count.get()).unwrap()
+                / setup.recipe.seconds())
+            .to_f64()
+            .unwrap();
             format!("{count:.1}")
         }
         ViewMode::Speed => {
-            let count = (configuration_speed_factor * i64::try_from(count.get()).unwrap() * speed)
-                .to_f64()
-                .unwrap();
+            let count = (setup.speed_factor()
+                * i64::try_from(count.get()).unwrap()
+                * speeds.machines[&setup.recipe]
+                / setup.recipe.seconds())
+            .to_f64()
+            .unwrap();
             format!("{count:.1}")
         }
     }
@@ -412,7 +430,7 @@ fn format_count(
 fn format_eu(view_mode: ViewMode, eu: i64, eu_factor: Rational64, speed: Rational64) -> String {
     match view_mode {
         ViewMode::Recipe => format!("{eu}"),
-        ViewMode::Configuration => {
+        ViewMode::Setup => {
             let eu = (eu_factor * eu).to_f64().unwrap();
             format!("{eu:.1}")
         }
@@ -457,10 +475,13 @@ impl CachedProcessingChain {
             self.processing_chain
                 .machines
                 .iter()
-                .flat_map(|machine_configuration| {
-                    TableRow::from_machine_configuration(view_mode, machine_configuration, &speeds)
-                })
-                .chain(TableRow::total(view_mode, &speeds, &self.processing_chain))
+                .flat_map(|setup| TableRow::from_setup(view_mode, setup, &speeds))
+                .chain(
+                    matches!(view_mode, ViewMode::Speed)
+                        .then(|| TableRow::total(&self.processing_chain, &speeds))
+                        .into_iter()
+                        .flatten(),
+                )
                 .collect::<Vec<_>>()
         })
     }
