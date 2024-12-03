@@ -1,29 +1,31 @@
 use std::{
     cell::OnceCell,
-    iter::{self, once},
-    mem::replace,
-    num::NonZeroU64,
+    iter::{self, once, once_with},
+    mem::take,
 };
 
 use egui::{Align, Layout, Response, Separator, Ui, Widget};
 use egui_extras::{Column, TableBuilder};
 use enum_map::{Enum, EnumMap};
 use enumset::{enum_set, EnumSet, EnumSetType};
-use num_rational::Rational64;
-use num_traits::ToPrimitive;
+use itertools::Itertools;
+use malachite::{
+    num::conversion::{string::options::ToSciOptions, traits::ToSci},
+    Rational,
+};
 
-use super::{ProcessingChain, Setup, Speeds};
-use crate::config::Product;
+use super::{ProcessingChain, Setup, WeightedSpeeds};
+use crate::{machine::Machines, recipe::ProductCount};
 
 pub struct ProcessingChainViewer<'a> {
     view_mode: &'a mut ViewMode,
-    processing_chain: &'a mut CachedProcessingChain,
+    processing_chain: &'a mut ProcessingChainTableRows,
 }
 
 impl<'a> ProcessingChainViewer<'a> {
     pub fn new(
         view_mode: &'a mut ViewMode,
-        processing_chain: &'a mut CachedProcessingChain,
+        processing_chain: &'a mut ProcessingChainTableRows,
     ) -> Self {
         Self {
             view_mode,
@@ -38,7 +40,7 @@ const ROW_SEPARATOR_HEIGHT: f32 = 7.0;
 
 impl Widget for ProcessingChainViewer<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
-        ui.vertical(|ui| {
+        ui.vertical_centered_justified(|ui| {
             ui.add(&mut *self.view_mode);
             ui.separator();
 
@@ -99,14 +101,6 @@ pub enum ViewMode {
 }
 
 impl ViewMode {
-    const fn count_header(self) -> &'static str {
-        match self {
-            ViewMode::Recipe => "#",
-            ViewMode::Setup => "/sec",
-            ViewMode::Speed => "/sec",
-        }
-    }
-
     const fn name(self) -> &'static str {
         match self {
             ViewMode::Recipe => "Recipe",
@@ -115,10 +109,18 @@ impl ViewMode {
         }
     }
 
+    const fn count_header(self) -> &'static str {
+        match self {
+            ViewMode::Recipe => "📦/🔄",
+            ViewMode::Setup => "📦/sec",
+            ViewMode::Speed => "📦/sec",
+        }
+    }
+
     const fn description(self) -> &'static str {
         match self {
             ViewMode::Recipe => "Shows information about only the recipes.",
-            ViewMode::Setup => "Shows information based on specific machine setup.",
+            ViewMode::Setup => "Shows information based on a specific machine setup.",
             ViewMode::Speed => "Shows information based on the effective speed of machines.",
         }
     }
@@ -132,14 +134,13 @@ impl ViewMode {
                     | TableColumn::ConsumedCount
                     | TableColumn::Produced
                     | TableColumn::ProducedCount
-                    | TableColumn::ProcessingTime
+                    | TableColumn::Time
                     | TableColumn::Eu
-                    | TableColumn::TotalEu
             ],
             Self::Setup => enum_set![
                 TableColumn::Machine
-                    | TableColumn::Catalysts
                     | TableColumn::Setup
+                    | TableColumn::Catalysts
                     | TableColumn::Consumed
                     | TableColumn::ConsumedCount
                     | TableColumn::Produced
@@ -148,8 +149,8 @@ impl ViewMode {
             ],
             Self::Speed => enum_set![
                 TableColumn::Machine
-                    | TableColumn::Catalysts
                     | TableColumn::Setup
+                    | TableColumn::Catalysts
                     | TableColumn::Speed
                     | TableColumn::Consumed
                     | TableColumn::ConsumedCount
@@ -180,29 +181,27 @@ enum TableColumn {
     Catalysts,
     Setup,
     Speed,
+    Time,
+    Eu,
     Consumed,
     ConsumedCount,
     Produced,
     ProducedCount,
-    ProcessingTime,
-    Eu,
-    TotalEu,
 }
 
 impl TableColumn {
     fn header(self, view_mode: ViewMode) -> &'static str {
         match self {
-            Self::Machine => "Machine",
-            Self::Catalysts => "Catalysts",
-            Self::Setup => "Setup",
-            Self::Speed => "Speed",
+            Self::Machine => "Machine 🏭",
+            Self::Catalysts => "Catalysts 🔥",
+            Self::Setup => "Setup 📜",
+            Self::Speed => "Speed ⏱",
             Self::Consumed => "Consumed",
             Self::ConsumedCount => view_mode.count_header(),
             Self::Produced => "Produced",
             Self::ProducedCount => view_mode.count_header(),
-            Self::ProcessingTime => "Processing Time",
-            Self::Eu => "EU/tick",
-            Self::TotalEu => "Total EU",
+            Self::Time => "Time 🔄",
+            Self::Eu => "Power ⚡",
         }
     }
 
@@ -222,28 +221,28 @@ impl TableColumn {
                 ViewMode::Setup => "Produced procuts by all machines.",
                 ViewMode::Speed => "Produced products at the current speed.",
             },
-            Self::ProcessingTime => "Duration of a single processing cycle.",
+            Self::Time => "Duration of a single processing cycle.",
             Self::Eu => match view_mode {
-                ViewMode::Recipe => "EU/t for a single machine without overclocking.",
+                ViewMode::Recipe => "EU/t for a single machine at its minimum voltage.",
                 ViewMode::Setup => "EU/t of all machines.",
                 ViewMode::Speed => "EU/t at the current speed.",
             },
-            Self::TotalEu => "Total EU per processing cycle.",
         }
     }
 
     fn table_builder_column(self) -> Column {
         match self {
-            Self::ConsumedCount | Self::ProducedCount => Column::auto(),
+            Self::Catalysts | Self::Eu | Self::ConsumedCount | Self::ProducedCount => {
+                Column::auto()
+            }
             _ => Column::auto().resizable(true),
         }
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct CachedProcessingChain {
+#[derive(Clone, Debug, Default)]
+pub struct ProcessingChainTableRows {
     processing_chain: ProcessingChain,
-    allow_overproduction: Vec<Product>,
     rows: EnumMap<ViewMode, OnceCell<Vec<TableRow>>>,
 }
 
@@ -259,189 +258,249 @@ impl TableRow {
     fn from_setup<'a>(
         view_mode: ViewMode,
         setup: &'a Setup,
-        speeds: &'a Speeds,
+        speed: &'a Rational,
     ) -> impl Iterator<Item = Self> + 'a {
-        let recipe = &setup.recipe;
+        let mut machine_col = once_with(|| setup.recipe.machine.name.clone());
 
-        let mut first = true;
-        let mut machines = setup.machines.iter();
-        let mut catalysts = recipe.catalysts.iter();
-        let mut consumed = recipe.consumed.iter();
-        let mut produced = recipe.produced.iter();
+        let mut machines_col: Box<dyn Iterator<Item = _>> = match &setup.machines {
+            Machines::Count(count) => Box::new(once(format!("🏭 ×{count}"))),
+            Machines::Overclocked(clocked_machines) => Box::new(
+                clocked_machines
+                    .machines
+                    .iter()
+                    .map(|(clocked_machine, count)| {
+                        let tier = clocked_machine.tier();
+                        let underclocking = clocked_machine.underclocking();
+                        if tier == underclocking {
+                            format!("🏭{tier} ×{count}",)
+                        } else {
+                            format!("🏭{tier}⤵{underclocking} ×{count}",)
+                        }
+                    }),
+            ),
+        };
+
+        let mut catalysts_col = setup
+            .recipe
+            .catalysts
+            .iter()
+            .map(|product| product.name.clone());
+
+        let mut speed_col = once_with(move || {
+            let speed_percent = speed * Rational::from(100);
+            let mut options = ToSciOptions::default();
+            options.set_scale(2);
+            format!("{}%", speed_percent.to_sci_with_options(options))
+        });
+
+        let mut consumed_col = product_names(&setup.recipe.consumed);
+        let mut produced_col = product_names(&setup.recipe.produced);
+
+        let mut consumed_count_col = product_counts(
+            view_mode,
+            &setup.recipe.consumed,
+            setup.recipe.seconds(),
+            setup.machines.speed_factor(),
+            speed,
+        );
+        let mut produced_count_col = product_counts(
+            view_mode,
+            &setup.recipe.produced,
+            setup.recipe.seconds(),
+            setup.machines.speed_factor(),
+            speed,
+        );
+
+        let mut time_col = once_with(|| {
+            let mut options = ToSciOptions::default();
+            options.set_scale(2);
+            format!(
+                "{} sec",
+                setup.recipe.seconds().to_sci_with_options(options)
+            )
+        });
+
+        let mut eu_col = once_with(move || match &setup.machines {
+            Machines::Count(_) => "".to_string(),
+            Machines::Overclocked(overclocked_machines) => match view_mode {
+                ViewMode::Recipe => {
+                    let eu = &overclocked_machines.base_eu_per_tick;
+                    format!("{eu} EU/t")
+                }
+                ViewMode::Setup => {
+                    let eu = overclocked_machines.eu_per_tick();
+                    format!("{eu} EU/t")
+                }
+                ViewMode::Speed => {
+                    let eu = Rational::from(overclocked_machines.eu_per_tick()) * speed;
+                    let mut options = ToSciOptions::default();
+                    options.set_scale(2);
+                    format!("{} EU/t", eu.to_sci_with_options(options))
+                }
+            },
+        });
 
         once(Self::Separator).chain(iter::from_fn(move || {
-            let first = replace(&mut first, false);
-            let machine = machines.next();
-            let catalyst = catalysts.next();
-            let consumed = consumed.next();
-            let produced = produced.next();
-
-            (first
-                || machine.is_some()
-                || catalyst.is_some()
-                || consumed.is_some()
-                || produced.is_some())
-            .then(|| Self::Columns {
-                texts: Box::new(EnumMap::from_fn(|column| match column {
-                    TableColumn::Machine => first
-                        .then(|| recipe.machine.name.clone())
-                        .unwrap_or_default(),
-                    TableColumn::Catalysts => catalyst
-                        .map(|product| product.name.clone())
-                        .unwrap_or_default(),
-                    TableColumn::Setup => machine
-                        .map(|(overclocking, count)| {
-                            if let Some(voltage) = recipe.voltage() {
-                                let voltage = voltage.with_overclocking(*overclocking);
-                                format!("{} x{count}", voltage)
-                            } else {
-                                format!("x{count}")
+            let texts = view_mode
+                .columns()
+                .into_iter()
+                .map(|column| {
+                    (
+                        column,
+                        match column {
+                            TableColumn::Machine => machine_col.next().unwrap_or_default(),
+                            TableColumn::Setup => machines_col.next().take().unwrap_or_default(),
+                            TableColumn::Catalysts => catalysts_col.next().unwrap_or_default(),
+                            TableColumn::Speed => speed_col.next().unwrap_or_default(),
+                            TableColumn::Consumed => consumed_col.next().unwrap_or_default(),
+                            TableColumn::ConsumedCount => {
+                                consumed_count_col.next().unwrap_or_default()
                             }
-                        })
-                        .unwrap_or_default(),
-                    TableColumn::Speed => first
-                        .then(|| {
-                            let speed = (speeds.machines[&setup.recipe] * 100).to_f64().unwrap();
-                            format!("{speed:.1}%")
-                        })
-                        .unwrap_or_default(),
-                    TableColumn::Consumed => consumed
-                        .map(|(product, _)| product.name.clone())
-                        .unwrap_or_default(),
-                    TableColumn::ConsumedCount => consumed
-                        .map(|(_, count)| format_count(view_mode, *count, setup, speeds))
-                        .unwrap_or_default(),
-                    TableColumn::Produced => produced
-                        .map(|(product, _)| product.name.clone())
-                        .unwrap_or_default(),
-                    TableColumn::ProducedCount => produced
-                        .map(|(_, count)| format_count(view_mode, *count, setup, speeds))
-                        .unwrap_or_default(),
-                    TableColumn::ProcessingTime => first
-                        .then(|| format!("{:.2} sec", recipe.seconds().to_f64().unwrap()))
-                        .unwrap_or_default(),
-                    TableColumn::Eu => first
-                        .then(|| {
-                            format_eu(
-                                view_mode,
-                                recipe.eu_per_tick,
-                                setup.eu_factor(),
-                                speeds.machines[recipe],
-                            )
-                        })
-                        .unwrap_or_default(),
-                    TableColumn::TotalEu => first
-                        .then(|| recipe.total_eu().to_string())
-                        .unwrap_or_default(),
-                })),
-            })
+                            TableColumn::Produced => produced_col.next().unwrap_or_default(),
+                            TableColumn::ProducedCount => {
+                                produced_count_col.next().unwrap_or_default()
+                            }
+                            TableColumn::Time => time_col.next().unwrap_or_default(),
+                            TableColumn::Eu => eu_col.next().unwrap_or_default(),
+                        },
+                    )
+                })
+                .collect::<EnumMap<_, _>>();
+
+            texts
+                .values()
+                .any(|text| !text.is_empty())
+                .then(|| Self::Columns {
+                    texts: Box::new(texts),
+                })
         }))
     }
 
     fn total<'a>(
+        view_mode: ViewMode,
         processing_chain: &'a ProcessingChain,
-        speeds: &'a Speeds,
+        weighted_speeds: &'a WeightedSpeeds,
     ) -> impl Iterator<Item = Self> + 'a {
-        let products = processing_chain.products(speeds);
+        let products = match view_mode {
+            ViewMode::Recipe => None,
+            ViewMode::Setup => Some(processing_chain.products_with_max_speeds()),
+            ViewMode::Speed => Some(processing_chain.products_with_speeds(weighted_speeds)),
+        };
 
-        let mut first = true;
-        let mut consumed = products
-            .products
-            .clone()
-            .into_iter()
-            .map(|(product, product_per_tick)| (product, product_per_tick.total()))
-            .filter(|(_, total)| *total < Rational64::ZERO)
-            .map(|(product, total)| (product, -total));
-        let mut produced = products
-            .products
-            .into_iter()
-            .map(|(product, product_per_tick)| (product, product_per_tick.total()))
-            .filter(|(_, total)| *total > Rational64::ZERO);
+        products
+            .map(move |products| {
+                let mut machine_col = once_with(|| "Total".to_string());
 
-        once(Self::Separator).chain(iter::from_fn(move || {
-            let first = replace(&mut first, false);
-            let consumed = consumed.next();
-            let produced = produced.next();
+                let mut consumed_col = products
+                    .products_per_sec
+                    .clone()
+                    .into_iter()
+                    .filter(|(_, amount)| *amount < 0)
+                    .map(|(product, amount)| {
+                        let mut options = ToSciOptions::default();
+                        options.set_scale(2);
+                        (
+                            product.name.clone(),
+                            (-amount).to_sci_with_options(options).to_string(),
+                        )
+                    });
 
-            (first || consumed.is_some() || produced.is_some()).then(|| Self::Columns {
-                texts: Box::new(EnumMap::from_fn(|column| match column {
-                    TableColumn::Machine => first.then(|| "Total".to_string()).unwrap_or_default(),
-                    TableColumn::Catalysts => String::new(),
-                    TableColumn::Setup => String::new(),
-                    TableColumn::Speed => String::new(),
-                    TableColumn::Consumed => consumed
-                        .as_ref()
-                        .map(|(product, _)| product.name.clone())
-                        .unwrap_or_default(),
-                    TableColumn::ConsumedCount => consumed
-                        .as_ref()
-                        .map(|(_, count)| {
-                            let count = count.to_f64().unwrap();
-                            format!("{:.1}", count)
+                let mut produced_col = products
+                    .products_per_sec
+                    .into_iter()
+                    .filter(|(_, amount)| *amount > 0)
+                    .map(|(product, amount)| {
+                        let mut options = ToSciOptions::default();
+                        options.set_scale(2);
+                        (
+                            product.name.clone(),
+                            amount.to_sci_with_options(options).to_string(),
+                        )
+                    });
+
+                let mut eu_col = once_with(|| {
+                    let eu = products.eu_per_tick;
+                    let mut options = ToSciOptions::default();
+                    options.set_scale(2);
+                    format!("{} EU/t", eu.to_sci_with_options(options))
+                });
+
+                once(Self::Separator).chain(iter::from_fn(move || {
+                    let (mut consumed, mut consumed_amount) =
+                        consumed_col.next().unwrap_or_default();
+                    let (mut produced, mut produced_amount) =
+                        produced_col.next().unwrap_or_default();
+
+                    let texts = view_mode
+                        .columns()
+                        .into_iter()
+                        .map(|column| {
+                            (
+                                column,
+                                match column {
+                                    TableColumn::Machine => machine_col.next().unwrap_or_default(),
+                                    TableColumn::Setup => String::new(),
+                                    TableColumn::Catalysts => String::new(),
+                                    TableColumn::Speed => String::new(),
+                                    TableColumn::Consumed => take(&mut consumed),
+                                    TableColumn::ConsumedCount => take(&mut consumed_amount),
+                                    TableColumn::Produced => take(&mut produced),
+                                    TableColumn::ProducedCount => take(&mut produced_amount),
+                                    TableColumn::Time => String::new(),
+                                    TableColumn::Eu => eu_col.next().unwrap_or_default(),
+                                },
+                            )
                         })
-                        .unwrap_or_default(),
-                    TableColumn::Produced => produced
-                        .as_ref()
-                        .map(|(product, _)| product.name.clone())
-                        .unwrap_or_default(),
-                    TableColumn::ProducedCount => produced
-                        .as_ref()
-                        .map(|(_, count)| {
-                            let count = count.to_f64().unwrap();
-                            format!("{:.1}", count)
+                        .collect::<EnumMap<_, _>>();
+
+                    texts
+                        .values()
+                        .any(|text| !text.is_empty())
+                        .then(|| Self::Columns {
+                            texts: Box::new(texts),
                         })
-                        .unwrap_or_default(),
-                    TableColumn::ProcessingTime => String::new(),
-                    TableColumn::Eu => first
-                        .then(|| {
-                            let eu = products.eu_per_tick.to_f64().unwrap();
-                            format!("{eu:.1}")
-                        })
-                        .unwrap_or_default(),
-                    TableColumn::TotalEu => String::new(),
-                })),
+                }))
             })
-        }))
+            .into_iter()
+            .flatten()
     }
 }
 
-fn format_count(view_mode: ViewMode, count: NonZeroU64, setup: &Setup, speeds: &Speeds) -> String {
-    match view_mode {
-        ViewMode::Recipe => count.to_string(),
-        ViewMode::Setup => {
-            let count = (setup.speed_factor() * i64::try_from(count.get()).unwrap()
-                / setup.recipe.seconds())
-            .to_f64()
-            .unwrap();
-            format!("{count:.1}")
-        }
-        ViewMode::Speed => {
-            let count = (setup.speed_factor()
-                * i64::try_from(count.get()).unwrap()
-                * speeds.machines[&setup.recipe]
-                / setup.recipe.seconds())
-            .to_f64()
-            .unwrap();
-            format!("{count:.1}")
-        }
-    }
+fn product_counts<'a>(
+    view_mode: ViewMode,
+    product_counts: &'a [ProductCount],
+    seconds: Rational,
+    speed_factor: Rational,
+    speed: &'a Rational,
+) -> impl Iterator<Item = String> + 'a {
+    product_counts
+        .iter()
+        .map(|product_count| product_count.count)
+        .map(move |count| match view_mode {
+            ViewMode::Recipe => count.to_string(),
+            ViewMode::Setup => {
+                let amount = Rational::from(count.get()) / &seconds * &speed_factor;
+                let mut options = ToSciOptions::default();
+                options.set_scale(2);
+                amount.to_sci_with_options(options).to_string()
+            }
+            ViewMode::Speed => {
+                let amount = Rational::from(count.get()) / &seconds * &speed_factor * speed;
+                let mut options = ToSciOptions::default();
+                options.set_scale(2);
+                amount.to_sci_with_options(options).to_string()
+            }
+        })
 }
 
-fn format_eu(view_mode: ViewMode, eu: i64, eu_factor: Rational64, speed: Rational64) -> String {
-    match view_mode {
-        ViewMode::Recipe => format!("{eu}"),
-        ViewMode::Setup => {
-            let eu = (eu_factor * eu).to_f64().unwrap();
-            format!("{eu:.1}")
-        }
-        ViewMode::Speed => {
-            let eu = (eu_factor * eu * speed).to_f64().unwrap();
-            format!("{eu:.1}")
-        }
-    }
+fn product_names(product_counts: &[ProductCount]) -> impl Iterator<Item = String> + '_ {
+    product_counts
+        .iter()
+        .map(|product_count| &product_count.product.name)
+        .cloned()
 }
 
-impl CachedProcessingChain {
+impl ProcessingChainTableRows {
     pub fn new(processing_chain: ProcessingChain) -> Self {
         Self {
             processing_chain,
@@ -458,30 +517,19 @@ impl CachedProcessingChain {
         &mut self.processing_chain
     }
 
-    fn allow_overproduction(&self) -> &[Product] {
-        &self.allow_overproduction
-    }
-
-    fn allow_overproduction_mut(&mut self) -> &mut Vec<Product> {
-        self.rows[ViewMode::Speed].take();
-        &mut self.allow_overproduction
-    }
-
     fn rows(&self, view_mode: ViewMode) -> &[TableRow] {
         self.rows[view_mode].get_or_init(|| {
-            let speeds = self
-                .processing_chain
-                .speeds(|product| self.allow_overproduction.contains(product));
+            let weighted_speeds = self.processing_chain.weighted_speeds();
             self.processing_chain
-                .machines
+                .setups
                 .iter()
-                .flat_map(|setup| TableRow::from_setup(view_mode, setup, &speeds))
-                .chain(
-                    matches!(view_mode, ViewMode::Speed)
-                        .then(|| TableRow::total(&self.processing_chain, &speeds))
-                        .into_iter()
-                        .flatten(),
-                )
+                .zip_eq(&weighted_speeds.speeds)
+                .flat_map(|(setup, speed)| TableRow::from_setup(view_mode, setup, speed))
+                .chain(TableRow::total(
+                    view_mode,
+                    &self.processing_chain,
+                    weighted_speeds,
+                ))
                 .collect::<Vec<_>>()
         })
     }

@@ -4,17 +4,30 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.93"
+bitvec = "1.0.1"
 eframe = { version = "0.29.1", features = ["persistence"] }
 egui = "0.29.1"
-egui_dock = { version = "0.14.0", features = ["serde"] }
+# egui_dock = { version = "0.14.0", features = ["serde"] }
 egui_extras = { version = "0.29.1", default-features = false }
 enum-map = "2.7.3"
 enumset = "1.1.5"
 itertools = "0.13.0"
-num-rational = { version = "0.4.2", features = ["serde"] }
-num-traits = "0.2.19"
-rfd = { version = "0.15.1", default-features = false }
+log = "0.4.22"
+malachite = "0.4.16"
+# rfd = { version = "0.15.1" }
 serde = { version = "1.0.215", features = ["derive"] }
 serde_json = "1.0.133"
-uuid = { version = "1.11.0", features = ["serde", "v4"] }
+thiserror = "2.0.4"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+env_logger = "0.11.5"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4.47"
+web-sys = "0.3.74"
+
+[profile.release]
+opt-level = 2 # fast and small wasm
+
+[profile.dev.package."*"]
+opt-level = 2

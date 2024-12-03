@@ -1,82 +1,88 @@
-[
-    {
-        "recipe": {
-            "machine": "Oil Drilling Rig",
-            "ticks": 20,
-            "eu_per_tick": 512,
-            "produced": [
-                [
-                    "Raw Oil",
-                    450
+{
+    "setups": [
+        {
+            "recipe": {
+                "machine": "Oil Drilling Rig",
+                "ticks": 25,
+                "catalysts": [
+                    "Circuit 42"
+                ],
+                "produced": [
+                    {
+                        "product": "Raw Oil",
+                        "count": 450
+                    }
                 ]
-            ]
+            },
+            "machines": 1
         },
-        "machines": {
-            "-2": 1
-        }
-    },
-    {
-        "recipe": {
-            "machine": "Distillation Tower",
-            "ticks": 20,
-            "eu_per_tick": 512,
-            "consumed": [
-                [
-                    "Raw Oil",
-                    100
+        {
+            "recipe": {
+                "machine": "Distillation Tower",
+                "ticks": 20,
+                "consumed": [
+                    {
+                        "product": "Raw Oil",
+                        "count": 100
+                    }
+                ],
+                "produced": [
+                    {
+                        "product": "Sulfuric Gas",
+                        "count": 60
+                    },
+                    {
+                        "product": "Sulfuric Heavy Fuel",
+                        "count": 10
+                    },
+                    {
+                        "product": "Sulfuric Light Fuel",
+                        "count": 50
+                    },
+                    {
+                        "product": "Sulfuric Naptha",
+                        "count": 15
+                    }
                 ]
-            ],
-            "produced": [
-                [
-                    "Sulfuric Gas",
-                    60
-                ],
-                [
-                    "Sulfuric Heavy Fuel",
-                    10
-                ],
-                [
-                    "Sulfuric Light Fuel",
-                    50
-                ],
-                [
-                    "Sulfuric Naptha",
-                    15
-                ]
-            ]
+            },
+            "machines": {
+                "base_eu_per_tick": 120,
+                "MV": 1
+            }
         },
-        "machines": {
-            "0": 1
-        }
-    },
-    {
-        "recipe": {
-            "machine": "Chemical Reactor",
-            "ticks": 160,
-            "eu_per_tick": 512,
-            "consumed": [
-                [
-                    "Sulfuric Gas",
-                    16000
+        {
+            "recipe": {
+                "machine": "Chemical Reactor",
+                "ticks": 160,
+                "consumed": [
+                    {
+                        "product": "Raw Oil",
+                        "count": 100
+                    },
+                    {
+                        "product": "Sulfuric Gas",
+                        "count": 16000
+                    },
+                    {
+                        "product": "Hydrogen Gas",
+                        "count": 2000
+                    }
                 ],
-                [
-                    "Hydrogen Gas",
-                    2000
+                "produced": [
+                    {
+                        "product": "Hydrogen Sulfide",
+                        "count": 1000
+                    },
+                    {
+                        "product": "Refinery Gas",
+                        "count": 16000
+                    }
                 ]
-            ],
-            "produced": [
-                [
-                    "Hydrogen Sulfide",
-                    1000
-                ],
-                [
-                    "Refinery Gas",
-                    16000
-                ]
-            ]
-        },
-        "machines": {
-            "0": 1
+            },
+            "machines": {
+                "base_eu_per_tick": 120,
+                "HV": 1
+            }
         }
-    }
-]
+    ]
+}

@@ -1,198 +1,299 @@
 pub mod ui;
 
-use std::collections::BTreeMap;
+use std::{
+    cell::OnceCell,
+    collections::{BTreeMap, BTreeSet},
+};
 
-use num_rational::Rational64;
+use bitvec::vec::BitVec;
+use itertools::Itertools;
+use malachite::{
+    num::basic::traits::{One, Zero},
+    Integer, Rational,
+};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Product, Recipe};
+use crate::{
+    machine::{ClockedMachines, Machines},
+    nullspace::nullspace,
+    recipe::{Product, Recipe},
+};
 
-#[derive(Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
+/// Consists of various machines that are processing [`Product`]s using specific [`Recipe`]s.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProcessingChain {
-    pub machines: Vec<Setup>,
+    /// The collection of all [`Setup`]s in this [`ProcessingChain`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    setups: Vec<Setup>,
+    /// [`Product`]s that are explicitly set to input/output of the entire [`ProcessingChain`].
+    ///
+    /// These [`Product`]s will not be forced to net-zero when solving for machine speeds.
+    /// Any [`Product`] that is either only produced or only consumed is treated as such
+    /// implicitly, as the producing/consuming machines would not be able to run at all.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    explicit_io: BTreeSet<Product>,
+    /// Caches various information about the [`ProcessingChain`].
+    ///
+    /// Whenever fields are updated relevant cached values are invalidated.
+    #[serde(skip)]
+    cache: Cache,
 }
 
 impl ProcessingChain {
-    /// Calculates how fast each [`Setup`] is running.
-    ///
-    /// At least one of the recipes will run at regular speed, i.e. `100%`. Other recipes will
-    /// slow down due to either not having enough input from previous recipes or producing more than
-    /// the followup machines can process.
-    ///
-    /// This assumes that machines are always either stopped or run at a 100%, i.e. there is no e.g.
-    /// warmup phase.
-    ///
-    /// Additionally, any [`Recipe`]s producing a [`Product`] matching the `allow_overproduction`
-    /// predicate will not be slowed down due to consuming machines not being able to keep up.
-    pub fn speeds(&self, allow_overproduction: impl Fn(&Product) -> bool) -> Speeds {
-        let mut speeds = Speeds {
-            machines: self
-                .machines
-                .iter()
-                .map(|setup| (setup.recipe.clone(), 1.into()))
-                .collect(),
-        };
+    pub fn setups(&self) -> &[Setup] {
+        &self.setups
+    }
 
-        while let Some((product, ProductPerSecond { consumed, produced })) = self
-            .products(&speeds)
-            .products
+    pub fn setups_mut(&mut self) -> &mut Vec<Setup> {
+        self.cache = Cache::default();
+        &mut self.setups
+    }
+
+    /// Updates a [`Setup::weight`], which only invalidated the cached [`WeightedSpeeds`].
+    pub fn set_weight(&mut self, index: usize, weight: Weight) {
+        self.cache.weighted_speeds.take();
+        self.setups[index].weight = weight;
+    }
+
+    pub fn explicit_ui(&self) -> &BTreeSet<Product> {
+        &self.explicit_io
+    }
+
+    pub fn explicit_io_mut(&mut self) -> &mut BTreeSet<Product> {
+        self.cache = Cache::default();
+        &mut self.explicit_io
+    }
+
+    pub fn products(&self) -> BTreeSet<&Product> {
+        self.setups
             .iter()
-            .filter(|(_, product_per_tick)| {
-                product_per_tick.is_produced() && product_per_tick.is_consumed()
-            })
-            .find(|(product, product_per_tick)| {
-                product_per_tick.is_underproduced()
-                    || product_per_tick.is_overproduced() && !allow_overproduction(product)
-            })
-        {
-            let (throttle, requires_throttling): (_, fn(_, _) -> _) = if produced > consumed {
-                (consumed / produced, Recipe::produces)
-            } else {
-                (produced / consumed, Recipe::consumes)
-            };
-
-            for (_, speed) in speeds
-                .machines
-                .iter_mut()
-                .filter(|(recipe, _)| requires_throttling(recipe, product))
-            {
-                *speed *= throttle
-            }
-        }
-
-        speeds
+            .flat_map(|setup| setup.recipe.products())
+            .collect()
     }
 
-    /// Returns the total [`ProductsPerTick`] assuming recipes are running at the given `speeds`.
-    pub fn products(&self, speeds: &Speeds) -> Products {
-        self.products_with_speed_callback(|recipe| speeds.machines[recipe])
+    /// Returns the total [`Products`] assuming all machines are running at normal speed.
+    pub fn products_with_max_speeds(&self) -> Products {
+        let speed = Rational::ONE;
+        self.products_with_speed_callback(|_| &speed)
     }
 
-    /// Returns the total [`ProductsPerTick`] assuming recipes are running at certain speeds.
-    fn products_with_speed_callback(
+    /// Returns the total [`Products`] assuming recipes are running at the given `speeds`.
+    pub fn products_with_speeds(&self, weighted_speeds: &WeightedSpeeds) -> Products {
+        self.products_with_speed_callback(|index| &weighted_speeds.speeds[index])
+    }
+
+    pub fn speeds(&self) -> &Speeds {
+        self.cache.speeds.get_or_init(|| Speeds::new(self))
+    }
+
+    pub fn weighted_speeds(&self) -> &WeightedSpeeds {
+        self.cache
+            .weighted_speeds
+            .get_or_init(|| WeightedSpeeds::new(self.speeds(), &self.setups))
+    }
+
+    /// Returns the total [`Products`] assuming recipes are running at certain speeds.
+    fn products_with_speed_callback<'a>(
         &self,
-        recipe_speed: impl Fn(&Recipe) -> Rational64,
+        setup_speed: impl Fn(usize) -> &'a Rational,
     ) -> Products {
-        self.machines
+        self.setups
             .iter()
-            .fold(Default::default(), |mut acc, setup| {
-                let recipe = &setup.recipe;
-                let speed = recipe_speed(recipe);
+            .enumerate()
+            .fold(Default::default(), |mut acc, (index, setup)| {
+                let speed = setup_speed(index);
 
-                let speed_factor = setup.speed_factor();
-                let seconds = recipe.seconds();
-                for (product, count) in recipe.products() {
-                    acc.products
-                        .entry(product.clone())
-                        .or_default()
-                        .add(speed_factor * count * speed / seconds);
+                for (product, count) in setup.products_per_sec() {
+                    *acc.products_per_sec.entry(product.clone()).or_default() += count * speed;
                 }
 
-                acc.eu_per_tick += setup.eu_factor() * recipe.eu_per_tick * speed;
+                match &setup.machines {
+                    Machines::Count(_) => {}
+                    Machines::Overclocked(overclocked_machines) => {
+                        acc.eu_per_tick +=
+                            Rational::from(overclocked_machines.eu_per_tick()) * speed;
+                    }
+                }
 
                 acc
             })
     }
 }
 
+#[derive(Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Products {
+    pub eu_per_tick: Rational,
+    pub products_per_sec: BTreeMap<Product, Rational>,
+}
+
+/// A set of machines that all produce the same [`Recipe`].
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Setup {
+    /// The recipe that this [`Setup`] is processing.
     pub recipe: Recipe,
-    pub machines: BTreeMap<Overclocking, u32>,
+    /// The number of machines per [`Voltage`] tier.
+    pub machines: Machines,
+    /// Used if another [`Setup`] also produces/consumes the same [`Product`].
+    ///
+    /// When multiple machines share a product, each machine's share is determined by both its
+    /// production/consumption rate and its weight.
+    ///
+    /// E.g. if machine `A` consumes `2P/sec` and machine `B` consumes `3P/sec`:
+    ///
+    /// - **If both have the same (non-zero) weight:**
+    ///   - `A` gets `2/5` and `B` gets `3/5`.
+    ///   - This is because their share is proportional to their consumption rate:
+    ///     - The total consumption rate is `2 + 3 = 5P/sec`.
+    ///     - `A`'s share = 2 out of 5 (`2/5`), and `B`'s share = 3 out of 5 (`3/5`).
+    ///
+    /// - **If `A` has twice the weight:**
+    ///   - Each machine's **effective weight** is the product of its weight and its consumption
+    ///     rate.
+    ///   - For `A` (weight `2`, consumption rate `2P/sec`):
+    ///     - Effective weight = `2 * 2 = 4`.
+    ///   - For `B` (weight `1`, consumption rate `3P/sec`):
+    ///     - Effective weight = `1 * 3 = 3`.
+    ///   - Total effective weight = `4 + 3 = 7`.
+    ///   - `A`'s share = `4/7` and `B`'s share = `3/7`.
+    ///
+    /// - **If `B` has zero weight:**
+    ///   - `A` gets 100% of the product, since `B` contributes no effective weight.
+    ///   - `A`'s share = `1` (100% of the product).
+    ///
+    /// **Note:** Setting a weight to zero effectively disables the [`Setup`],
+    /// preventing the machine from contributing to the product allocation. This is useful for
+    /// temporarily stopping a machine from participating in the allocation process.
+    #[serde(default)]
+    pub weight: Weight,
 }
 
 impl Setup {
-    /// How fast this [`Setup`] can process recipes.
-    pub fn speed_factor(&self) -> Rational64 {
-        self.machines
-            .iter()
-            .map(|(overclocking, count)| overclocking.speed_factor() * i64::from(*count))
-            .sum()
-    }
-
-    /// How much more EU this [`Setup`] uses.
-    pub fn eu_factor(&self) -> Rational64 {
-        self.machines
-            .iter()
-            .map(|(overclocking, count)| overclocking.eu_factor() * i64::from(*count))
-            .sum()
-    }
-}
-
-#[derive(
-    Clone, Copy, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
-)]
-#[serde(transparent)]
-pub struct Overclocking(pub i8);
-
-impl Overclocking {
-    /// How much faster recipes are processed for this [`Overclocking`].
-    pub fn speed_factor(self) -> Rational64 {
-        Rational64::from(2).pow(self.0.into())
-    }
-
-    /// How much more EU is required for this [`Overclocking`].
-    pub fn eu_factor(self) -> Rational64 {
-        Rational64::from(4).pow(self.0.into())
-    }
-}
-
-#[derive(Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Speeds {
-    pub machines: BTreeMap<Recipe, Rational64>,
-}
-
-#[derive(Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Products {
-    pub eu_per_tick: Rational64,
-    pub products: BTreeMap<Product, ProductPerSecond>,
-}
-
-#[derive(
-    Clone, Copy, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
-)]
-#[serde(deny_unknown_fields)]
-pub struct ProductPerSecond {
-    /// Always positive.
-    consumed: Rational64,
-    /// Always positive.
-    produced: Rational64,
-}
-
-impl ProductPerSecond {
-    pub fn total(self) -> Rational64 {
-        self.produced - self.consumed
-    }
-
-    pub fn add(&mut self, count: Rational64) {
-        if count > Rational64::ZERO {
-            self.produced += count;
-        } else {
-            self.consumed -= count;
+    pub fn total_eu(&self) -> Integer {
+        match self.machines {
+            Machines::Count(_) => Integer::ZERO,
+            Machines::Overclocked(ClockedMachines {
+                base_eu_per_tick, ..
+            }) => Integer::from(self.recipe.ticks.get()) * Integer::from(base_eu_per_tick.get()),
         }
     }
 
-    fn is_produced(&self) -> bool {
-        self.produced != Rational64::ZERO
+    /// How fast this [`Setup`] can process recipes.
+    pub fn speed_factor(&self) -> Rational {
+        match &self.machines {
+            Machines::Count(count) => (*count).into(),
+            Machines::Overclocked(overclocked_machines) => overclocked_machines.speed_factor(),
+        }
     }
 
-    fn is_consumed(&self) -> bool {
-        self.consumed != Rational64::ZERO
+    fn products_per_sec(&self) -> impl Iterator<Item = (&Product, Rational)> {
+        let speed_factor = self.speed_factor();
+        self.recipe
+            .products_per_sec()
+            .map(move |(product, amount)| (product, amount * &speed_factor))
     }
+}
 
-    fn is_catalyst(self) -> bool {
-        !self.is_produced() && !self.is_consumed()
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Weight(pub u64);
+
+impl Default for Weight {
+    fn default() -> Self {
+        Self(1)
     }
+}
 
-    fn is_underproduced(self) -> bool {
-        self.produced < self.consumed
+#[derive(Clone, Debug, Default)]
+struct Cache {
+    /// Does not change if only weights change.
+    speeds: OnceCell<Speeds>,
+    weighted_speeds: OnceCell<WeightedSpeeds>,
+}
+
+#[derive(Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Speeds {
+    weighted_setups: BitVec,
+    speeds: Vec<Rational>,
+}
+
+impl Speeds {
+    fn new(processing_chain: &ProcessingChain) -> Self {
+        let processing_chains = processing_chain.setups.len();
+
+        let setup_products_per_sec = processing_chain
+            .setups
+            .iter()
+            .map(|setup| setup.products_per_sec().collect::<BTreeMap<_, _>>())
+            .collect_vec();
+
+        let matrix = processing_chain
+            .products()
+            .into_iter()
+            .filter(|product| {
+                !processing_chain.explicit_io.contains(product)
+                    && processing_chain
+                        .setups
+                        .iter()
+                        .any(|setup| setup.recipe.consumes(product))
+                    && processing_chain
+                        .setups
+                        .iter()
+                        .any(|setup| setup.recipe.produces(product))
+            })
+            .flat_map(|product| {
+                (0..processing_chains).map(|setup_index| {
+                    setup_products_per_sec[setup_index]
+                        .get(product)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+            })
+            .collect_vec();
+
+        let (weighted_setups, speeds) = nullspace(matrix, processing_chains);
+        Self {
+            weighted_setups,
+            speeds,
+        }
     }
+}
 
-    fn is_overproduced(self) -> bool {
-        self.produced > self.consumed
+#[derive(Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WeightedSpeeds {
+    speeds: Vec<Rational>,
+}
+
+impl WeightedSpeeds {
+    fn new(speeds: &Speeds, setups: &[Setup]) -> Self {
+        let mut speeds = speeds
+            .speeds
+            .chunks_exact(setups.len())
+            .zip(
+                speeds
+                    .weighted_setups
+                    .iter_ones()
+                    .map(|index| &setups[index]),
+            )
+            .fold(
+                vec![Rational::ONE; setups.len()],
+                |mut acc, (speeds, setup)| {
+                    for (acc_speed, speed) in acc.iter_mut().zip_eq(speeds) {
+                        *acc_speed *= speed * Rational::from(setup.weight.0);
+                    }
+                    acc
+                },
+            );
+
+        if let Some(max_speed) = speeds.iter().max().cloned() {
+            if max_speed != Rational::ZERO {
+                for speed in &mut speeds {
+                    *speed /= &max_speed;
+                }
+            }
+        }
+
+        Self { speeds }
     }
 }
