@@ -32,7 +32,6 @@ impl Machines {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ClockedMachines {
     pub base_eu_per_tick: NonZeroI64,
     #[serde(flatten)]
