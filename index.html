@@ -87,31 +87,66 @@
 
     /* ---------------------------------------------- */
     /* Loading animation from https://loading.io/css/ */
-    .lds-dual-ring {
+    .lds-ripple {
+      /* change color here */
+      color: #debeeb
+    }
+
+    .lds-ripple,
+    .lds-ripple div {
+      box-sizing: border-box;
+    }
+
+    .lds-ripple {
       display: inline-block;
-      width: 24px;
-      height: 24px;
+      position: relative;
+      width: 80px;
+      height: 80px;
     }
 
-    .lds-dual-ring:after {
-      content: " ";
-      display: block;
-      width: 24px;
-      height: 24px;
-      margin: 0px;
+    .lds-ripple div {
+      position: absolute;
+      border: 4px solid currentColor;
+      opacity: 1;
       border-radius: 50%;
-      border: 3px solid #fff;
-      border-color: #fff transparent #fff transparent;
-      animation: lds-dual-ring 1.2s linear infinite;
+      animation: lds-ripple 1s cubic-bezier(0, 0.2, 0.8, 1) infinite;
     }
 
-    @keyframes lds-dual-ring {
+    .lds-ripple div:nth-child(2) {
+      animation-delay: -0.5s;
+    }
+
+    @keyframes lds-ripple {
       0% {
-        transform: rotate(0deg);
+        top: 36px;
+        left: 36px;
+        width: 8px;
+        height: 8px;
+        opacity: 0;
+      }
+
+      4.9% {
+        top: 36px;
+        left: 36px;
+        width: 8px;
+        height: 8px;
+        opacity: 0;
+      }
+
+      5% {
+        top: 36px;
+        left: 36px;
+        width: 8px;
+        height: 8px;
+        opacity: 1;
       }
 
       100% {
-        transform: rotate(360deg);
+        top: 0;
+        left: 0;
+        width: 80px;
+        height: 80px;
+        opacity: 0;
       }
     }
   </style>
@@ -124,10 +159,11 @@
 
   <!-- the loading spinner will be removed in main.rs -->
   <div class="centered" id="loading_text">
-    <p style="font-size:16px">
-      Loading…
-    </p>
-    <div class="lds-dual-ring"></div>
+    <div class="lds-ripple">
+      <div></div>
+      <div></div>
+    </div>
+    <p>🏭 GregCalc is loading...</p>
   </div>
 
   <!--Register Service Worker. this will cache the wasm / js scripts for offline use (for PWA functionality). -->
