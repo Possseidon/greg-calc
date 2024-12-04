@@ -6,7 +6,10 @@ use std::{
 };
 
 use enum_map::Enum;
-use malachite::{num::basic::traits::One, Integer, Rational};
+use malachite::{
+    num::basic::traits::{One, Zero},
+    Integer, Rational,
+};
 use serde::{
     de::{Error, Unexpected},
     Deserialize, Deserializer, Serialize, Serializer,
@@ -17,53 +20,71 @@ use thiserror::Error;
 #[serde(untagged)]
 pub enum Machines {
     /// A fixed number of machines that don't require power and run at regular speed.
-    Count(u64),
+    Eco(u64),
     /// A collection of machines at certain [`Voltage`] levels.
-    Overclocked(ClockedMachines),
+    Power(ClockedMachines),
 }
 
 impl Machines {
-    pub fn speed_factor(&self) -> Rational {
-        match self {
-            Self::Count(_) => Rational::ONE,
-            Self::Overclocked(overclocked_machines) => overclocked_machines.speed_factor(),
+    /// Returns how fast a recipe is produced for its given `recipe_voltage`.
+    pub fn speed_factor(
+        &self,
+        recipe_voltage: Option<Voltage>,
+    ) -> Result<Rational, MachinePowerError> {
+        match (recipe_voltage, self) {
+            (None, Self::Eco(count)) => Ok(Rational::from(*count)),
+            (Some(recipe_voltage), Self::Power(clocked_machines)) => {
+                Ok(clocked_machines.speed_factor(recipe_voltage))
+            }
+            (None, Self::Power(_)) => Err(MachinePowerError::RequiresEco),
+            (Some(_), Self::Eco(_)) => Err(MachinePowerError::RequiresPower),
+        }
+    }
+
+    pub fn eu_per_tick(&self, recipe_eu_per_tick: i64) -> Result<Integer, MachinePowerError> {
+        match (recipe_eu_per_tick.try_into().ok(), self) {
+            (None, Self::Eco(_)) => Ok(Integer::ZERO),
+            (Some(recipe_eu_per_tick), Self::Power(clocked_machines)) => {
+                Ok(clocked_machines.eu_per_tick(recipe_eu_per_tick))
+            }
+            (None, Self::Power(_)) => Err(MachinePowerError::RequiresEco),
+            (Some(_), Self::Eco(_)) => Err(MachinePowerError::RequiresPower),
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Error)]
+pub enum MachinePowerError {
+    #[error("recipe requires machines that do not deal with power")]
+    RequiresEco,
+    #[error("recipe requires machines that deal with power")]
+    RequiresPower,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ClockedMachines {
-    pub base_eu_per_tick: NonZeroI64,
     #[serde(flatten)]
     pub machines: BTreeMap<ClockedMachine, NonZeroU64>,
 }
 
 impl ClockedMachines {
-    /// Returns the minimum required [`Voltage`] based on [`Self::eu_per_tick`].
-    ///
-    /// Returns [`None`] if the recipe neither consumes nor produces power.
-    pub fn base_voltage(&self) -> Voltage {
-        Voltage::from_signed_eu_per_tick(self.base_eu_per_tick)
-    }
-
-    pub fn speed_factor(&self) -> Rational {
-        let base_voltage = self.base_voltage();
+    pub fn speed_factor(&self, recipe_voltage: Voltage) -> Rational {
         self.machines
             .iter()
             .map(|(clocked_machine, count)| {
-                clocked_machine.underclocking.speed_factor(base_voltage)
+                clocked_machine.underclocking.speed_factor(recipe_voltage)
                     * Rational::from(count.get())
             })
             .sum()
     }
 
-    pub fn eu_per_tick(&self) -> Integer {
-        let base_voltage = self.base_voltage();
+    pub fn eu_per_tick(&self, recipe_eu_per_tick: NonZeroI64) -> Integer {
+        let recipe_voltage = Voltage::from_signed_eu_per_tick(recipe_eu_per_tick);
         self.machines
             .iter()
             .map(|(clocked_machine, count)| {
-                let eu = Integer::from(self.base_eu_per_tick.get())
-                    << clocked_machine.underclocking.eu_factor_log2(base_voltage);
+                let eu = Integer::from(recipe_eu_per_tick.get())
+                    << clocked_machine.underclocking.eu_factor_log2(recipe_voltage);
                 assert!(
                     eu > 0,
                     "underclocking should not be able to result in less than 1 eu per tick"
@@ -217,26 +238,27 @@ impl Voltage {
         }
     }
 
-    /// How much faster (or slower) a machine is running for a given `base_voltage`.
+    /// How much faster (or slower) a machine is running for a given `recipe_voltage`.
     ///
-    /// E.g. [`Voltage::High`] will run four times faster for a `base_voltage` of [`Voltage::Low`].
-    pub fn speed_factor(self, base_voltage: Voltage) -> Rational {
-        Rational::ONE << self.overclocking_steps(base_voltage)
-    }
-
-    /// How much more energy a machine is consuming for a given `base_voltage` in `log2`.
-    ///
-    /// E.g. [`Voltage::High`] will require sixteen times more energy for a `base_voltage` of
+    /// E.g. [`Voltage::High`] will run four times faster for a `recipe_voltage` of
     /// [`Voltage::Low`].
-    pub fn eu_factor_log2(self, base_voltage: Voltage) -> i8 {
-        2 * self.overclocking_steps(base_voltage)
+    pub fn speed_factor(self, recipe_voltage: Voltage) -> Rational {
+        Rational::ONE << self.overclocking_steps(recipe_voltage)
     }
 
-    /// The number of overclocking steps from the given `base_voltage`.
+    /// How much more energy a machine is consuming for a given `recipe_voltage` in `log2`.
     ///
-    /// E.g. [`Voltage::High`] is `2` steps over a `base_voltage` of [`Voltage::Low`].
-    pub fn overclocking_steps(self, base_voltage: Voltage) -> i8 {
-        self as i8 - base_voltage as i8
+    /// E.g. [`Voltage::High`] will require sixteen times more energy for a `recipe_voltage` of
+    /// [`Voltage::Low`].
+    pub fn eu_factor_log2(self, recipe_voltage: Voltage) -> i8 {
+        2 * self.overclocking_steps(recipe_voltage)
+    }
+
+    /// The number of overclocking steps from the given `recipe_voltage`.
+    ///
+    /// E.g. [`Voltage::High`] is `2` steps over a `recipe_voltage` of [`Voltage::Low`].
+    pub fn overclocking_steps(self, recipe_voltage: Voltage) -> i8 {
+        self as i8 - recipe_voltage as i8
     }
 }
 

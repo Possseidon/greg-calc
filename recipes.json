@@ -20,6 +20,7 @@
             "recipe": {
                 "machine": "Distillation Tower",
                 "ticks": 20,
+                "eu_per_tick": 120,
                 "consumed": [
                     {
                         "product": "Raw Oil",
@@ -46,7 +47,6 @@
                 ]
             },
             "machines": {
-                "base_eu_per_tick": 120,
                 "MV": 1
             }
         },
@@ -54,6 +54,7 @@
             "recipe": {
                 "machine": "Chemical Reactor",
                 "ticks": 160,
+                "eu_per_tick": 120,
                 "consumed": [
                     {
                         "product": "Raw Oil",
@@ -80,7 +81,6 @@
                 ]
             },
             "machines": {
-                "base_eu_per_tick": 120,
                 "HV": 1
             }
         }

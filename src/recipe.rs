@@ -3,11 +3,15 @@ use std::{collections::BTreeMap, num::NonZeroU64};
 use malachite::{Integer, Rational};
 use serde::{Deserialize, Serialize};
 
+use crate::machine::Voltage;
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Recipe {
     pub machine: Machine,
     pub ticks: NonZeroU64,
+    #[serde(default)]
+    pub eu_per_tick: i64,
     #[serde(default)]
     pub catalysts: Vec<Product>,
     #[serde(default)]
@@ -17,6 +21,19 @@ pub struct Recipe {
 }
 
 impl Recipe {
+    pub fn total_eu(&self) -> Integer {
+        Integer::from(self.ticks.get()) * Integer::from(self.eu_per_tick)
+    }
+
+    /// Returns the minimum required [`Voltage`] based on [`Self::eu_per_tick`].
+    ///
+    /// Returns [`None`] if the recipe neither consumes nor produces power.
+    pub fn voltage(&self) -> Option<Voltage> {
+        Some(Voltage::from_signed_eu_per_tick(
+            self.eu_per_tick.try_into().ok()?,
+        ))
+    }
+
     pub fn products(&self) -> impl Iterator<Item = &Product> {
         let consumed = self
             .consumed

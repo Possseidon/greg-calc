@@ -2,6 +2,7 @@ use std::{
     cell::OnceCell,
     iter::{self, once, once_with},
     mem::take,
+    num::NonZeroU64,
 };
 
 use egui::{Align, Layout, Response, Separator, Ui, Widget};
@@ -10,12 +11,18 @@ use enum_map::{Enum, EnumMap};
 use enumset::{enum_set, EnumSet, EnumSetType};
 use itertools::Itertools;
 use malachite::{
-    num::conversion::{string::options::ToSciOptions, traits::ToSci},
+    num::{
+        basic::traits::One,
+        conversion::{string::options::ToSciOptions, traits::ToSci},
+    },
     Rational,
 };
 
-use super::{ProcessingChain, Setup, WeightedSpeeds};
-use crate::{machine::Machines, recipe::ProductCount};
+use super::{ProcessingChain, Setup};
+use crate::{
+    machine::{MachinePowerError, Machines},
+    recipe::ProductCount,
+};
 
 pub struct ProcessingChainViewer<'a> {
     view_mode: &'a mut ViewMode,
@@ -263,21 +270,18 @@ impl TableRow {
         let mut machine_col = once_with(|| setup.recipe.machine.name.clone());
 
         let mut machines_col: Box<dyn Iterator<Item = _>> = match &setup.machines {
-            Machines::Count(count) => Box::new(once(format!("🏭 ×{count}"))),
-            Machines::Overclocked(clocked_machines) => Box::new(
-                clocked_machines
-                    .machines
-                    .iter()
-                    .map(|(clocked_machine, count)| {
-                        let tier = clocked_machine.tier();
-                        let underclocking = clocked_machine.underclocking();
-                        if tier == underclocking {
-                            format!("🏭{tier} ×{count}",)
-                        } else {
-                            format!("🏭{tier}⤵{underclocking} ×{count}",)
-                        }
-                    }),
-            ),
+            Machines::Eco(count) => Box::new(once(format!("🏭 ×{count}"))),
+            Machines::Power(clocked_machines) => Box::new(clocked_machines.machines.iter().map(
+                |(clocked_machine, count)| {
+                    let tier = clocked_machine.tier();
+                    let underclocking = clocked_machine.underclocking();
+                    if tier == underclocking {
+                        format!("🏭{tier} ×{count}",)
+                    } else {
+                        format!("🏭{tier}⤵{underclocking} ×{count}",)
+                    }
+                },
+            )),
         };
 
         let mut catalysts_col = setup
@@ -296,20 +300,10 @@ impl TableRow {
         let mut consumed_col = product_names(&setup.recipe.consumed);
         let mut produced_col = product_names(&setup.recipe.produced);
 
-        let mut consumed_count_col = product_counts(
-            view_mode,
-            &setup.recipe.consumed,
-            setup.recipe.seconds(),
-            setup.machines.speed_factor(),
-            speed,
-        );
-        let mut produced_count_col = product_counts(
-            view_mode,
-            &setup.recipe.produced,
-            setup.recipe.seconds(),
-            setup.machines.speed_factor(),
-            speed,
-        );
+        let mut consumed_count_col =
+            product_counts(view_mode, &setup.recipe.consumed, setup, speed);
+        let mut produced_count_col =
+            product_counts(view_mode, &setup.recipe.produced, setup, speed);
 
         let mut time_col = once_with(|| {
             let mut options = ToSciOptions::default();
@@ -320,23 +314,23 @@ impl TableRow {
             )
         });
 
-        let mut eu_col = once_with(move || match &setup.machines {
-            Machines::Count(_) => "".to_string(),
-            Machines::Overclocked(overclocked_machines) => match view_mode {
-                ViewMode::Recipe => {
-                    let eu = &overclocked_machines.base_eu_per_tick;
-                    format!("{eu} EU/t")
-                }
-                ViewMode::Setup => {
-                    let eu = overclocked_machines.eu_per_tick();
-                    format!("{eu} EU/t")
-                }
-                ViewMode::Speed => {
-                    let eu = Rational::from(overclocked_machines.eu_per_tick()) * speed;
+        let mut eu_col = once_with(move || match view_mode {
+            ViewMode::Recipe => {
+                let eu = &setup.recipe.eu_per_tick;
+                format!("{eu} EU/t")
+            }
+            ViewMode::Setup => match setup.machines.eu_per_tick(setup.recipe.eu_per_tick) {
+                Ok(eu) => format!("{eu} EU/t"),
+                Err(_) => "⚠".into(),
+            },
+            ViewMode::Speed => match setup.machines.eu_per_tick(setup.recipe.eu_per_tick) {
+                Ok(eu) => {
+                    let eu = Rational::from(eu) * speed;
                     let mut options = ToSciOptions::default();
                     options.set_scale(2);
                     format!("{} EU/t", eu.to_sci_with_options(options))
                 }
+                Err(_) => "⚠".into(),
             },
         });
 
@@ -376,15 +370,16 @@ impl TableRow {
         }))
     }
 
-    fn total<'a>(
+    fn total(
         view_mode: ViewMode,
-        processing_chain: &'a ProcessingChain,
-        weighted_speeds: &'a WeightedSpeeds,
-    ) -> impl Iterator<Item = Self> + 'a {
+        processing_chain: &ProcessingChain,
+    ) -> impl Iterator<Item = Self> {
         let products = match view_mode {
             ViewMode::Recipe => None,
             ViewMode::Setup => Some(processing_chain.products_with_max_speeds()),
-            ViewMode::Speed => Some(processing_chain.products_with_speeds(weighted_speeds)),
+            ViewMode::Speed => {
+                Some(processing_chain.products_with_speeds(processing_chain.weighted_speeds()))
+            }
         };
 
         products
@@ -469,28 +464,33 @@ impl TableRow {
 fn product_counts<'a>(
     view_mode: ViewMode,
     product_counts: &'a [ProductCount],
-    seconds: Rational,
-    speed_factor: Rational,
+    setup: &'a Setup,
     speed: &'a Rational,
 ) -> impl Iterator<Item = String> + 'a {
     product_counts
         .iter()
         .map(|product_count| product_count.count)
         .map(move |count| match view_mode {
-            ViewMode::Recipe => count.to_string(),
-            ViewMode::Setup => {
-                let amount = Rational::from(count.get()) / &seconds * &speed_factor;
-                let mut options = ToSciOptions::default();
-                options.set_scale(2);
-                amount.to_sci_with_options(options).to_string()
-            }
-            ViewMode::Speed => {
-                let amount = Rational::from(count.get()) / &seconds * &speed_factor * speed;
-                let mut options = ToSciOptions::default();
-                options.set_scale(2);
-                amount.to_sci_with_options(options).to_string()
-            }
+            ViewMode::Recipe => Ok(count.to_string()),
+            ViewMode::Setup => amount_with_speed(count, setup, &Rational::ONE),
+            ViewMode::Speed => amount_with_speed(count, setup, speed),
         })
+        .map(|count| match count {
+            Ok(count) => count,
+            Err(_) => "⚠".into(),
+        })
+}
+
+fn amount_with_speed(
+    count: NonZeroU64,
+    setup: &Setup,
+    speed: &Rational,
+) -> Result<String, MachinePowerError> {
+    let speed_factor = setup.machines.speed_factor(setup.recipe.voltage())?;
+    let amount = Rational::from(count.get()) / setup.recipe.seconds() * speed_factor * speed;
+    let mut options = ToSciOptions::default();
+    options.set_scale(2);
+    Ok(amount.to_sci_with_options(options).to_string())
 }
 
 fn product_names(product_counts: &[ProductCount]) -> impl Iterator<Item = String> + '_ {
@@ -519,17 +519,12 @@ impl ProcessingChainTableRows {
 
     fn rows(&self, view_mode: ViewMode) -> &[TableRow] {
         self.rows[view_mode].get_or_init(|| {
-            let weighted_speeds = self.processing_chain.weighted_speeds();
             self.processing_chain
                 .setups
                 .iter()
-                .zip_eq(&weighted_speeds.speeds)
+                .zip_eq(&self.processing_chain.weighted_speeds().speeds)
                 .flat_map(|(setup, speed)| TableRow::from_setup(view_mode, setup, speed))
-                .chain(TableRow::total(
-                    view_mode,
-                    &self.processing_chain,
-                    weighted_speeds,
-                ))
+                .chain(TableRow::total(view_mode, &self.processing_chain))
                 .collect::<Vec<_>>()
         })
     }

@@ -1,7 +1,7 @@
 pub mod ui;
 
 use std::{
-    cell::OnceCell,
+    cell::{LazyCell, OnceCell},
     collections::{BTreeMap, BTreeSet},
 };
 
@@ -9,12 +9,12 @@ use bitvec::vec::BitVec;
 use itertools::Itertools;
 use malachite::{
     num::basic::traits::{One, Zero},
-    Integer, Rational,
+    Rational,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    machine::{ClockedMachines, Machines},
+    machine::{MachinePowerError, Machines},
     nullspace::nullspace,
     recipe::{Product, Recipe},
 };
@@ -94,6 +94,8 @@ impl ProcessingChain {
     }
 
     /// Returns the total [`Products`] assuming recipes are running at certain speeds.
+    ///
+    /// Setups with [`MachinePowerError`] are ignored.
     fn products_with_speed_callback<'a>(
         &self,
         setup_speed: impl Fn(usize) -> &'a Rational,
@@ -104,16 +106,12 @@ impl ProcessingChain {
             .fold(Default::default(), |mut acc, (index, setup)| {
                 let speed = setup_speed(index);
 
-                for (product, count) in setup.products_per_sec() {
+                for (product, count) in setup.products_per_sec_filter_ok() {
                     *acc.products_per_sec.entry(product.clone()).or_default() += count * speed;
                 }
 
-                match &setup.machines {
-                    Machines::Count(_) => {}
-                    Machines::Overclocked(overclocked_machines) => {
-                        acc.eu_per_tick +=
-                            Rational::from(overclocked_machines.eu_per_tick()) * speed;
-                    }
+                if let Ok(eu_per_tick) = setup.machines.eu_per_tick(setup.recipe.eu_per_tick) {
+                    acc.eu_per_tick += Rational::from(eu_per_tick) * speed;
                 }
 
                 acc
@@ -170,28 +168,31 @@ pub struct Setup {
 }
 
 impl Setup {
-    pub fn total_eu(&self) -> Integer {
-        match self.machines {
-            Machines::Count(_) => Integer::ZERO,
-            Machines::Overclocked(ClockedMachines {
-                base_eu_per_tick, ..
-            }) => Integer::from(self.recipe.ticks.get()) * Integer::from(base_eu_per_tick.get()),
-        }
-    }
-
     /// How fast this [`Setup`] can process recipes.
-    pub fn speed_factor(&self) -> Rational {
-        match &self.machines {
-            Machines::Count(count) => (*count).into(),
-            Machines::Overclocked(overclocked_machines) => overclocked_machines.speed_factor(),
-        }
+    pub fn speed_factor(&self) -> Result<Rational, MachinePowerError> {
+        self.machines.speed_factor(self.recipe.voltage())
     }
 
-    fn products_per_sec(&self) -> impl Iterator<Item = (&Product, Rational)> {
-        let speed_factor = self.speed_factor();
+    fn products_per_sec_filter_ok(&self) -> impl Iterator<Item = (&Product, Rational)> {
+        self.products_per_sec()
+            .filter_map(|(product, amount)| amount.ok().map(|amount| (product, amount)))
+    }
+
+    fn products_per_sec(
+        &self,
+    ) -> impl Iterator<Item = (&Product, Result<Rational, MachinePowerError>)> {
+        let speed_factor = LazyCell::new(|| self.speed_factor());
         self.recipe
             .products_per_sec()
-            .map(move |(product, amount)| (product, amount * &speed_factor))
+            .map(move |(product, amount)| {
+                (
+                    product,
+                    speed_factor
+                        .as_ref()
+                        .map(|speed_factor| amount * speed_factor)
+                        .map_err(|error| *error),
+                )
+            })
     }
 }
 
@@ -219,13 +220,20 @@ pub struct Speeds {
 }
 
 impl Speeds {
+    /// TODO
+    ///
+    /// Any [`Setup`]s with a [`MachinePowerError`] are ignored.
     fn new(processing_chain: &ProcessingChain) -> Self {
         let processing_chains = processing_chain.setups.len();
 
         let setup_products_per_sec = processing_chain
             .setups
             .iter()
-            .map(|setup| setup.products_per_sec().collect::<BTreeMap<_, _>>())
+            .map(|setup| {
+                setup
+                    .products_per_sec_filter_ok()
+                    .collect::<BTreeMap<_, _>>()
+            })
             .collect_vec();
 
         let matrix = processing_chain
