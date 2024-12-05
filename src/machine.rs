@@ -86,7 +86,7 @@ impl ClockedMachines {
                 let eu = Integer::from(recipe_eu_per_tick.get())
                     << clocked_machine.underclocking.eu_factor_log2(recipe_voltage);
                 assert!(
-                    eu > 0,
+                    eu != 0,
                     "underclocking should not be able to result in less than 1 eu per tick"
                 );
                 eu * Integer::from(count.get())
