@@ -5,14 +5,17 @@ use std::{
     num::NonZeroU64,
 };
 
-use egui::{Align, Layout, Response, Separator, Ui, Widget};
+use egui::{
+    text::{CCursor, CCursorRange},
+    Align, DragValue, Layout, Response, Separator, TextEdit, Ui, Widget,
+};
 use egui_extras::{Column, TableBuilder};
 use enum_map::{Enum, EnumMap};
 use enumset::{enum_set, EnumSet, EnumSetType};
 use itertools::Itertools;
 use malachite::{
     num::{
-        basic::traits::One,
+        basic::traits::{One, Zero},
         conversion::{string::options::ToSciOptions, traits::ToSci},
     },
     Rational,
@@ -21,7 +24,7 @@ use malachite::{
 use crate::model::{
     machine::{ClockedMachine, Machines},
     processing_chain::{ProcessingChain, Setup},
-    recipe::{Machine, Product, ProductCount},
+    recipe::{Machine, Product, ProductCount, Recipe},
 };
 
 const HEADER_HEIGHT: f32 = 30.0;
@@ -32,6 +35,7 @@ const ROW_SEPARATOR_HEIGHT: f32 = 7.0;
 pub struct ProcessingChainTable {
     processing_chain: ProcessingChain,
     rows: EnumMap<ViewMode, OnceCell<Vec<TableRow>>>,
+    editing_cell: Option<((TableColumn, usize), Option<EditingBuffer>)>,
 }
 
 impl ProcessingChainTable {
@@ -65,21 +69,36 @@ impl ProcessingChainTable {
                 }
             })
             .body(|body| {
-                let rows = self.rows(view_mode);
+                let rows = Self::rows(&self.rows, &self.processing_chain, view_mode);
                 body.heterogeneous_rows(rows.iter().map(TableRow::height), |mut row| {
-                    let index = row.index();
+                    let row_index = row.index();
                     for column in columns {
                         row.col(|ui| {
-                            match &rows[index] {
+                            match &rows[row_index] {
                                 TableRow::Cells(cells) => {
                                     if let Some(cell) = &cells[column] {
-                                        if let Some(new_action) =
-                                            cell.show(ui, &self.processing_chain)
-                                        {
-                                            if action.is_none() {
-                                                action = Some(new_action);
+                                        let cell_pos = (column, row_index);
+
+                                        let mut tmp_editing_buffer = None;
+                                        let editing_buffer = match &mut self.editing_cell {
+                                            Some((editing_cell_pos, editing_buffer))
+                                                if *editing_cell_pos == cell_pos =>
+                                            {
+                                                editing_buffer
                                             }
+                                            _ => &mut tmp_editing_buffer,
                                         };
+
+                                        if let Some(new_action) =
+                                            cell.show(ui, &self.processing_chain, editing_buffer)
+                                        {
+                                            action.get_or_insert(new_action);
+                                        };
+
+                                        if tmp_editing_buffer.is_some() {
+                                            self.editing_cell =
+                                                Some((cell_pos, tmp_editing_buffer));
+                                        }
                                     }
                                 }
                                 TableRow::Separator => {
@@ -92,7 +111,9 @@ impl ProcessingChainTable {
             });
 
         if let Some(action) = action {
-            action.execute(&mut self.processing_chain);
+            for view_mode in action.execute(&mut self.processing_chain) {
+                self.rows[view_mode] = Default::default();
+            }
         }
     }
 
@@ -105,24 +126,28 @@ impl ProcessingChainTable {
         &mut self.processing_chain
     }
 
-    fn rows(&self, view_mode: ViewMode) -> &[TableRow] {
-        self.rows[view_mode].get_or_init(|| {
-            self.processing_chain
+    fn rows<'a>(
+        rows: &'a EnumMap<ViewMode, OnceCell<Vec<TableRow>>>,
+        processing_chain: &ProcessingChain,
+        view_mode: ViewMode,
+    ) -> &'a [TableRow] {
+        rows[view_mode].get_or_init(|| {
+            processing_chain
                 .setups()
                 .iter()
-                .zip_eq(self.processing_chain.weighted_speeds().speeds())
+                .zip_eq(processing_chain.weighted_speeds().speeds())
                 .enumerate()
                 .flat_map(|(index, (setup, speed))| {
                     TableRow::from_setup(view_mode, index, setup, speed)
                 })
-                .chain(TableRow::total(view_mode, &self.processing_chain))
+                .chain(TableRow::total(view_mode, processing_chain))
                 .collect::<Vec<_>>()
         })
     }
 }
 
 /// The mode at which the [`ProcessingChain`] is viewed.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Enum)]
+#[derive(Debug, Hash, PartialOrd, Ord, Enum, EnumSetType)]
 pub enum ViewMode {
     Recipe,
     Setup,
@@ -130,6 +155,10 @@ pub enum ViewMode {
 }
 
 impl ViewMode {
+    const NONE: EnumSet<Self> = EnumSet::empty();
+    const CALCULATED: EnumSet<Self> = enum_set![ViewMode::Setup | ViewMode::Speed];
+    const ALL: EnumSet<Self> = EnumSet::all();
+
     const fn name(self) -> &'static str {
         match self {
             ViewMode::Recipe => "Recipe",
@@ -348,7 +377,7 @@ impl TableRow {
                 .filter(|(_, amount)| *amount < 0)
                 .map(|(product, amount)| {
                     (
-                        TotalTableCellContent::Product(product.name.clone()),
+                        TotalTableCellContent::Product(product),
                         TotalTableCellContent::ProductAmount(Box::new(-amount)),
                     )
                 });
@@ -359,7 +388,7 @@ impl TableRow {
                 .filter(|(_, amount)| *amount > 0)
                 .map(|(product, amount)| {
                     (
-                        TotalTableCellContent::Product(product.name.clone()),
+                        TotalTableCellContent::Product(product),
                         TotalTableCellContent::ProductAmount(Box::new(amount)),
                     )
                 });
@@ -480,14 +509,28 @@ enum TableCell {
 }
 
 impl TableCell {
-    fn show(&self, ui: &mut Ui, processing_chain: &ProcessingChain) -> Option<Action> {
+    fn show(
+        &self,
+        ui: &mut Ui,
+        processing_chain: &ProcessingChain,
+        editing_buffer: &mut Option<EditingBuffer>,
+    ) -> Option<Action> {
         match self {
-            Self::Setup { index, content } => content.show(
-                ui,
-                &processing_chain.setups()[*index],
-                &processing_chain.weighted_speeds().speeds()[*index],
-            ),
-            Self::Total { content } => content.show(ui),
+            Self::Setup { index, content } => content
+                .show(
+                    &processing_chain.setups()[*index],
+                    &processing_chain.weighted_speeds().speeds()[*index],
+                    editing_buffer,
+                    ui,
+                )
+                .map(|property| Action::SetupProperty {
+                    index: *index,
+                    property,
+                }),
+            Self::Total { content } => {
+                content.show(ui);
+                None
+            }
         }
     }
 }
@@ -528,17 +571,26 @@ impl SetupTableCellContent {
         })
     }
 
-    fn show(&self, ui: &mut Ui, setup: &Setup, speed: &Rational) -> Option<Action> {
+    fn show(
+        &self,
+        setup: &Setup,
+        speed: &Rational,
+        editing_buffer: &mut Option<EditingBuffer>,
+        ui: &mut Ui,
+    ) -> Option<SetupProperty> {
         match self {
-            Self::Machine => {
-                ui.label(&setup.recipe.machine.name);
-            }
-            Self::Catalyst { index } => {
-                ui.label(&setup.recipe.catalysts[*index].name);
-            }
+            Self::Machine => editable_machine(&setup.recipe.machine, editing_buffer, ui),
+            Self::Catalyst { index } => editable_product(
+                &setup.recipe.catalysts[*index],
+                editing_buffer,
+                *index,
+                ProductKind::Catalyst,
+                ui,
+            ),
             Self::SetupEco => {
                 if let Machines::Eco(count) = setup.machines {
                     ui.label(format!("🏭 ×{count}"));
+                    None
                 } else {
                     unreachable!();
                 }
@@ -553,53 +605,57 @@ impl SetupTableCellContent {
                     } else {
                         ui.label(format!("🏭{tier}⤵{underclocking} ×{count}"));
                     }
+                    None
                 } else {
                     unreachable!();
                 }
             }
-            Self::Time => {
-                let mut options = ToSciOptions::default();
-                options.set_scale(2);
-                ui.label(format!(
-                    "{} sec",
-                    setup.recipe.seconds().to_sci_with_options(options)
-                ));
-            }
+            Self::Time => editable_time(&setup.recipe, ui),
             Self::Speed => {
                 let speed_percent = speed * Rational::from(100);
                 let mut options = ToSciOptions::default();
                 options.set_scale(2);
                 ui.label(format!("{}%", speed_percent.to_sci_with_options(options)));
+                None
             }
-            Self::EuPerTickRecipe => {
-                ui.label(format!("{} EU/t", setup.recipe.eu_per_tick));
-            }
+            Self::EuPerTickRecipe => editable_eu_per_tick(setup.recipe.eu_per_tick, ui),
             Self::EuPerTick(eu) => {
-                let mut options = ToSciOptions::default();
-                options.set_scale(2);
-                ui.label(format!("{} EU/t", eu.to_sci_with_options(options)));
+                eu_per_tick(ui, eu);
+                None
             }
-            Self::Produced { index } => {
-                ui.label(&setup.recipe.produced[*index].product.name);
-            }
-            Self::Consumed { index } => {
-                ui.label(&setup.recipe.consumed[*index].product.name);
-            }
+            Self::Produced { index } => editable_product(
+                &setup.recipe.produced[*index].product,
+                editing_buffer,
+                *index,
+                ProductKind::Produced,
+                ui,
+            ),
+            Self::Consumed { index } => editable_product(
+                &setup.recipe.consumed[*index].product,
+                editing_buffer,
+                *index,
+                ProductKind::Consumed,
+                ui,
+            ),
             Self::ProducedCount { index } => {
-                let count = setup.recipe.produced[*index].count;
-                ui.label(format!("×{count}"));
+                editable_count(setup.recipe.produced[*index].count, ui, |count| {
+                    SetupProperty::SetProducedCount {
+                        index: *index,
+                        count,
+                    }
+                })
             }
             Self::ConsumedCount { index } => {
-                let count = setup.recipe.consumed[*index].count;
-                ui.label(format!("×{count}"));
+                editable_count(setup.recipe.consumed[*index].count, ui, |count| {
+                    SetupProperty::SetConsumedCount {
+                        index: *index,
+                        count,
+                    }
+                })
             }
             Self::ProductAmount(amount) => {
-                let mut options = ToSciOptions::default();
-                options.set_scale(2);
-                ui.label(amount.to_sci_with_options(options).to_string())
-                    .on_hover_ui(|ui| {
-                        ui.label(amount.to_string());
-                    });
+                product_amount(ui, amount);
+                None
             }
             Self::PowerError => {
                 ui.label("⚠")
@@ -608,71 +664,173 @@ impl SetupTableCellContent {
                         Ordering::Equal => "This recipe requires machine without voltage.",
                         Ordering::Greater => "This recipe requires a machine that produces power.",
                     });
+                None
             }
         }
-
-        None
     }
+}
+
+fn editable_eu_per_tick(eu_per_tick: i64, ui: &mut Ui) -> Option<SetupProperty> {
+    let mut new_eu_per_tick = eu_per_tick;
+    ui.add(DragValue::new(&mut new_eu_per_tick).suffix(" EU/t"));
+    (new_eu_per_tick != eu_per_tick).then_some(SetupProperty::SetEuPerTick {
+        eu_per_tick: new_eu_per_tick,
+    })
+}
+
+fn eu_per_tick(ui: &mut Ui, eu: &Rational) {
+    let mut options = ToSciOptions::default();
+    options.set_scale(2);
+    ui.label(format!("{} EU/t", eu.to_sci_with_options(options)))
+        .on_hover_ui(|ui| {
+            ui.set_max_width(ui.spacing().tooltip_width);
+            let dir = match eu.cmp(&Rational::ZERO) {
+                Ordering::Less => "Consumes",
+                Ordering::Equal => {
+                    ui.label("Neither consumes nor produces EU.");
+                    return;
+                }
+                Ordering::Greater => "Produces",
+            };
+            let (eu, ticks) = eu.numerator_and_denominator_ref();
+            ui.label(format!("{dir} {eu} EU / {ticks} ticks"));
+        });
+}
+
+fn editable_machine(
+    machine: &Machine,
+    editing_buffer: &mut Option<EditingBuffer>,
+    ui: &mut Ui,
+) -> Option<SetupProperty> {
+    ui.label(&machine.name);
+    None
+}
+
+fn editable_product(
+    product: &Product,
+    editing_buffer: &mut Option<EditingBuffer>,
+    index: usize,
+    kind: ProductKind,
+    ui: &mut Ui,
+) -> Option<SetupProperty> {
+    if let Some(EditingBuffer { just_opened, text }) = editing_buffer {
+        let mut edit = TextEdit::singleline(text).show(ui);
+        if *just_opened {
+            *just_opened = false;
+            edit.state.cursor.set_char_range(Some(CCursorRange::two(
+                CCursor::default(),
+                CCursor::new(text.chars().count()),
+            )));
+            edit.state.store(ui.ctx(), edit.response.id);
+            edit.response.request_focus();
+        }
+
+        if edit.response.lost_focus() || edit.response.clicked_elsewhere() {
+            let new_product_name = editing_buffer.take().expect("should be set").text;
+            let trimmed_product_name = new_product_name.trim();
+            if trimmed_product_name.is_empty() {
+                return Some(SetupProperty::RemoveProduct { kind, index });
+            }
+
+            if trimmed_product_name != product.name {
+                return Some(SetupProperty::RenameProduct {
+                    kind,
+                    index,
+                    product: Product {
+                        name: if trimmed_product_name.len() == new_product_name.len() {
+                            new_product_name
+                        } else {
+                            trimmed_product_name.to_string()
+                        },
+                    },
+                });
+            }
+        }
+    } else {
+        let label = ui.label(&product.name);
+        if label.clicked() {
+            *editing_buffer = Some(EditingBuffer {
+                just_opened: true,
+                text: product.name.to_string(),
+            });
+        }
+        let mut action = None;
+        label.context_menu(|ui| {
+            if ui.button("Remove").clicked() {
+                ui.close_menu();
+                action = Some(SetupProperty::RemoveProduct { kind, index });
+            }
+        });
+        if action.is_some() {
+            return action;
+        }
+    }
+
+    None
+}
+
+fn editable_count(
+    count: NonZeroU64,
+    ui: &mut Ui,
+    into_property: impl FnOnce(NonZeroU64) -> SetupProperty,
+) -> Option<SetupProperty> {
+    let mut new_count = count;
+    ui.add(DragValue::new(&mut new_count).prefix("×"));
+    (new_count != count).then(|| into_property(new_count))
+}
+
+fn product_amount(ui: &mut Ui, amount: &Rational) {
+    let mut options = ToSciOptions::default();
+    options.set_scale(2);
+    ui.label(amount.to_sci_with_options(options).to_string())
+        .on_hover_ui(|ui| {
+            ui.set_max_width(ui.spacing().tooltip_width);
+            let (count, sec) = amount.numerator_and_denominator_ref();
+            ui.label(format!("{count} 📦 / {sec} sec"));
+        });
+}
+
+fn editable_time(recipe: &Recipe, ui: &mut Ui) -> Option<SetupProperty> {
+    let mut ticks = recipe.ticks;
+    ui.add(
+        DragValue::new(&mut ticks)
+            .custom_parser(|text| text.parse::<f64>().ok().map(|value| value * 20.0))
+            .custom_formatter(|value, _| (value / 20.0).to_string())
+            .suffix(" sec"),
+    );
+    (ticks != recipe.ticks).then_some(SetupProperty::SetTime { ticks })
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 enum TotalTableCellContent {
     Header,
     /// Can be modified, which updates the name in _all_ [`Setup`]s.
-    Product(String),
+    Product(Product),
     ProductAmount(Box<Rational>),
     EuPerTick(Box<Rational>),
 }
 
 impl TotalTableCellContent {
-    fn show(&self, ui: &mut Ui) -> Option<Action> {
+    fn show(&self, ui: &mut Ui) {
         match self {
             Self::Header => {
                 ui.label("Total");
             }
             Self::Product(product) => {
-                ui.label(product);
+                ui.label(&product.name);
             }
             Self::ProductAmount(amount) => {
-                let mut options = ToSciOptions::default();
-                options.set_scale(2);
-                ui.label(amount.to_sci_with_options(options).to_string());
+                product_amount(ui, amount);
             }
-            Self::EuPerTick(eu) => {
-                let mut options = ToSciOptions::default();
-                options.set_scale(2);
-                ui.label(format!("{} EU/t", eu.to_sci_with_options(options)));
-            }
+            Self::EuPerTick(eu) => eu_per_tick(ui, eu),
         }
-
-        None
     }
 }
 
 enum Action {
-    SetMachine {
-        setup_index: usize,
-        machine: Machine,
-    },
-    SetProduced {
-        setup_index: usize,
-        product_index: usize,
-        product: Product,
-    },
-    SetProducedCount {
-        setup_index: usize,
-        product_index: usize,
-        count: NonZeroU64,
-    },
-    SetConsumed {
-        setup_index: usize,
-        product_index: usize,
-        product: Product,
-    },
-    SetConsumedCount {
-        setup_index: usize,
-        product_index: usize,
-        count: NonZeroU64,
+    SetupProperty {
+        index: usize,
+        property: SetupProperty,
     },
     ReplaceProduct {
         old: Product,
@@ -681,49 +839,194 @@ enum Action {
 }
 
 impl Action {
-    fn execute(self, processing_chain: &mut ProcessingChain) {
+    /// Performs the action on the given `processing_chain`.
+    ///
+    /// Returns which cached [`ProcessingChainTable::rows`] need to be invalidated.
+    fn execute(self, processing_chain: &mut ProcessingChain) -> EnumSet<ViewMode> {
         match self {
-            Self::SetMachine {
-                setup_index,
-                machine,
-            } => {
-                processing_chain.setups_mut()[setup_index].recipe.machine = machine;
-            }
-            Self::SetProduced {
-                setup_index,
-                product_index,
-                product,
-            } => {
-                processing_chain.setups_mut()[setup_index].recipe.produced[product_index].product =
-                    product;
-            }
-            Self::SetProducedCount {
-                setup_index,
-                product_index,
-                count,
-            } => {
-                processing_chain.setups_mut()[setup_index].recipe.produced[product_index].count =
-                    count;
-            }
-            Self::SetConsumed {
-                setup_index,
-                product_index,
-                product,
-            } => {
-                processing_chain.setups_mut()[setup_index].recipe.consumed[product_index].product =
-                    product;
-            }
-            Self::SetConsumedCount {
-                setup_index,
-                product_index,
-                count,
-            } => {
-                processing_chain.setups_mut()[setup_index].recipe.consumed[product_index].count =
-                    count;
-            }
-            Self::ReplaceProduct { old, new } => {
+            Action::SetupProperty { index, property } => property.apply(processing_chain, index),
+            Action::ReplaceProduct { old, new } => {
                 processing_chain.replace_product(&old, new);
+                ViewMode::CALCULATED
             }
         }
     }
+}
+
+enum ProductKind {
+    Catalyst,
+    Consumed,
+    Produced,
+}
+
+enum SetupProperty {
+    SetMachine {
+        machine: Machine,
+    },
+
+    AddProduct {
+        kind: ProductKind,
+        product: Product,
+    },
+    RemoveProduct {
+        kind: ProductKind,
+        index: usize,
+    },
+    MoveProduct {
+        kind: ProductKind,
+        from: usize,
+        to: usize,
+    },
+    RenameProduct {
+        kind: ProductKind,
+        index: usize,
+        product: Product,
+    },
+
+    SetProducedCount {
+        index: usize,
+        count: NonZeroU64,
+    },
+    SetConsumedCount {
+        index: usize,
+        count: NonZeroU64,
+    },
+
+    SetTime {
+        ticks: NonZeroU64,
+    },
+    SetEuPerTick {
+        eu_per_tick: i64,
+    },
+}
+
+impl SetupProperty {
+    fn apply(
+        self,
+        processing_chain: &mut ProcessingChain,
+        setup_index: usize,
+    ) -> EnumSet<ViewMode> {
+        match self {
+            Self::SetMachine { machine } => {
+                *processing_chain.machine_mut(setup_index) = machine;
+                ViewMode::NONE
+            }
+            Self::AddProduct { kind, product } => {
+                match kind {
+                    ProductKind::Catalyst => {
+                        processing_chain.catalysts_mut(setup_index).push(product);
+                    }
+                    ProductKind::Consumed => processing_chain.setups_mut()[setup_index]
+                        .recipe
+                        .consumed
+                        .push(ProductCount {
+                            product,
+                            count: NonZeroU64::MIN,
+                        }),
+                    ProductKind::Produced => processing_chain.setups_mut()[setup_index]
+                        .recipe
+                        .produced
+                        .push(ProductCount {
+                            product,
+                            count: NonZeroU64::MIN,
+                        }),
+                }
+                ViewMode::ALL
+            }
+            Self::RemoveProduct { kind, index } => {
+                match kind {
+                    ProductKind::Catalyst => {
+                        processing_chain.catalysts_mut(setup_index).remove(index);
+                    }
+                    ProductKind::Consumed => {
+                        processing_chain.setups_mut()[setup_index]
+                            .recipe
+                            .consumed
+                            .remove(index);
+                    }
+                    ProductKind::Produced => {
+                        processing_chain.setups_mut()[setup_index]
+                            .recipe
+                            .produced
+                            .remove(index);
+                    }
+                }
+                ViewMode::ALL
+            }
+            Self::MoveProduct { kind, from, to } => {
+                match kind {
+                    ProductKind::Catalyst => {
+                        move_item(processing_chain.catalysts_mut(setup_index), from, to);
+                    }
+                    ProductKind::Consumed => {
+                        move_item(
+                            &mut processing_chain.setups_mut()[setup_index].recipe.consumed,
+                            from,
+                            to,
+                        );
+                    }
+                    ProductKind::Produced => {
+                        move_item(
+                            &mut processing_chain.setups_mut()[setup_index].recipe.produced,
+                            from,
+                            to,
+                        );
+                    }
+                }
+                ViewMode::NONE
+            }
+            Self::RenameProduct {
+                kind,
+                index,
+                product,
+            } => {
+                match kind {
+                    ProductKind::Catalyst => {
+                        processing_chain.catalysts_mut(setup_index)[index] = product;
+                    }
+                    ProductKind::Consumed => {
+                        processing_chain.setups_mut()[setup_index].recipe.consumed[index].product =
+                            product;
+                    }
+                    ProductKind::Produced => {
+                        processing_chain.setups_mut()[setup_index].recipe.produced[index].product =
+                            product;
+                    }
+                }
+                ViewMode::CALCULATED
+            }
+            Self::SetProducedCount { index, count } => {
+                processing_chain.setups_mut()[setup_index].recipe.produced[index].count = count;
+                ViewMode::CALCULATED
+            }
+            Self::SetConsumedCount { index, count } => {
+                processing_chain.setups_mut()[setup_index].recipe.consumed[index].count = count;
+                ViewMode::CALCULATED
+            }
+            Self::SetTime { ticks } => {
+                processing_chain.setups_mut()[setup_index].recipe.ticks = ticks;
+                ViewMode::CALCULATED
+            }
+            Self::SetEuPerTick { eu_per_tick } => {
+                processing_chain.setups_mut()[setup_index]
+                    .recipe
+                    .eu_per_tick = eu_per_tick;
+                ViewMode::CALCULATED
+            }
+        }
+    }
+}
+
+fn move_item<T>(items: &mut [T], from: usize, to: usize) {
+    match from.cmp(&to) {
+        Ordering::Less => items[from..=to].rotate_left(1),
+        Ordering::Equal => {}
+        Ordering::Greater => items[to..=from].rotate_right(1),
+    }
+}
+
+#[derive(Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+struct EditingBuffer {
+    just_opened: bool,
+    text: String,
 }

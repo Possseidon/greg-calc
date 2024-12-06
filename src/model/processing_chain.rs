@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     machine::{MachinePowerError, Machines},
-    recipe::{Product, Recipe},
+    recipe::{Machine, Product, Recipe},
 };
 use crate::math::nullspace::nullspace;
 
@@ -48,7 +48,15 @@ impl ProcessingChain {
         &mut self.setups
     }
 
-    /// Updates a [`Setup::weight`], which only invalidated the cached [`WeightedSpeeds`].
+    pub fn machine_mut(&mut self, index: usize) -> &mut Machine {
+        &mut self.setups[index].recipe.machine
+    }
+
+    pub fn catalysts_mut(&mut self, index: usize) -> &mut Vec<Product> {
+        &mut self.setups[index].recipe.catalysts
+    }
+
+    /// Updates a [`Setup::weight`], which only invalidates the cached [`WeightedSpeeds`].
     pub fn set_weight(&mut self, index: usize, weight: Weight) {
         self.cache.weighted_speeds.take();
         self.setups[index].weight = weight;
@@ -92,12 +100,12 @@ impl ProcessingChain {
     }
 
     pub fn replace_product(&mut self, old: &Product, new: Product) {
-        for setup in &mut self.setups {
+        for setup in self.setups_mut() {
             setup.recipe.replace_product(old, &new);
         }
 
-        if self.explicit_io.remove(old) {
-            self.explicit_io.insert(new);
+        if self.explicit_io_mut().remove(old) {
+            self.explicit_io_mut().insert(new);
         }
     }
 

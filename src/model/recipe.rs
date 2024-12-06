@@ -91,10 +91,15 @@ impl Recipe {
     }
 
     pub fn replace_product(&mut self, old: &Product, new: &Product) {
-        for ProductCount { product, .. } in self.consumed.iter_mut().chain(&mut self.produced) {
-            if *product == *old {
-                *product = new.clone();
-            }
+        for product in self
+            .consumed
+            .iter_mut()
+            .chain(&mut self.produced)
+            .map(|ProductCount { product, .. }| product)
+            .chain(&mut self.catalysts)
+            .filter(|product| *product == old)
+        {
+            *product = new.clone();
         }
     }
 }
