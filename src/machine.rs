@@ -213,7 +213,7 @@ impl Voltage {
 
     pub fn from_eu_per_tick(eu_per_tick: NonZeroU64) -> Self {
         Self::from_index(
-            (eu_per_tick.ilog2() - 3)
+            (eu_per_tick.ilog2().saturating_sub(3))
                 .div_ceil(2)
                 .try_into()
                 .unwrap_or(u8::MAX),
