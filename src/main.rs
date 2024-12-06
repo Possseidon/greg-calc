@@ -1,11 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![cfg_attr(debug_assertions, allow(dead_code))]
 
-mod app;
-mod machine;
-mod nullspace;
-mod processing;
-mod recipe;
+pub mod math;
+pub mod model;
+mod ui;
+
+use ui::app::GregCalc;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), eframe::Error> {
@@ -14,7 +14,7 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "GregCalc",
         Default::default(),
-        Box::new(|creation_context| Ok(Box::new(app::GregCalc::new(creation_context)))),
+        Box::new(|creation_context| Ok(Box::new(GregCalc::new(creation_context)))),
     )
 }
 
@@ -42,7 +42,7 @@ fn main() {
             .start(
                 canvas,
                 web_options,
-                Box::new(|creation_context| Ok(Box::new(app::GregCalc::new(creation_context)))),
+                Box::new(|creation_context| Ok(Box::new(GregCalc::new(creation_context)))),
             )
             .await;
 

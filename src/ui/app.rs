@@ -2,14 +2,14 @@ use eframe::{App, CreationContext, Frame, Storage};
 use egui::{global_theme_preference_switch, menu, Button, CentralPanel, Context, TopBottomPanel};
 use log::info;
 
-use crate::processing::ui::{ProcessingChainTableRows, ProcessingChainViewer, ViewMode};
+use super::processing_chain_table::{ProcessingChainTable, ViewMode};
 
 #[derive(Clone, Debug)]
 pub struct GregCalc {
     // config: Config,
     // tabs: Tabs,
     // dock_state: DockState<Tab>,
-    processing_chain: ProcessingChainTableRows,
+    processing_chain_state: ProcessingChainTable,
     processing_chain_view_mode: ViewMode,
     notifications: Vec<Notification>,
 }
@@ -37,8 +37,8 @@ impl GregCalc {
             // config,
             // tabs,
             // dock_state,
-            processing_chain: ProcessingChainTableRows::new(
-                serde_json::from_str(include_str!("../recipes.json")).unwrap(),
+            processing_chain_state: ProcessingChainTable::new(
+                serde_json::from_str(include_str!("../../recipes.json")).unwrap(),
             ),
             processing_chain_view_mode: ViewMode::Recipe,
             notifications: Default::default(),
@@ -158,10 +158,10 @@ impl App for GregCalc {
         // self.show_dock_area(ctx);
 
         CentralPanel::default().show(ctx, |ui| {
-            ui.add(ProcessingChainViewer::new(
-                &mut self.processing_chain_view_mode,
-                &mut self.processing_chain,
-            ));
+            ui.add(&mut self.processing_chain_view_mode);
+            ui.separator();
+            self.processing_chain_state
+                .show(self.processing_chain_view_mode, ui);
         });
     }
 

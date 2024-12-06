@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, num::NonZeroU64};
 use malachite::{Integer, Rational};
 use serde::{Deserialize, Serialize};
 
-use crate::machine::Voltage;
+use super::machine::Voltage;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -88,6 +88,14 @@ impl Recipe {
 
     pub const fn seconds(&self) -> Rational {
         Rational::const_from_unsigneds(self.ticks.get(), 20)
+    }
+
+    pub fn replace_product(&mut self, old: &Product, new: &Product) {
+        for ProductCount { product, .. } in self.consumed.iter_mut().chain(&mut self.produced) {
+            if *product == *old {
+                *product = new.clone();
+            }
+        }
     }
 }
 

@@ -1,5 +1,3 @@
-pub mod ui;
-
 use std::{
     cell::{LazyCell, OnceCell},
     collections::{BTreeMap, BTreeSet},
@@ -13,11 +11,11 @@ use malachite::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{
+use super::{
     machine::{MachinePowerError, Machines},
-    nullspace::nullspace,
     recipe::{Product, Recipe},
 };
+use crate::math::nullspace::nullspace;
 
 /// Consists of various machines that are processing [`Product`]s using specific [`Recipe`]s.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -91,6 +89,16 @@ impl ProcessingChain {
         self.cache
             .weighted_speeds
             .get_or_init(|| WeightedSpeeds::new(self.speeds(), &self.setups))
+    }
+
+    pub fn replace_product(&mut self, old: &Product, new: Product) {
+        for setup in &mut self.setups {
+            setup.recipe.replace_product(old, &new);
+        }
+
+        if self.explicit_io.remove(old) {
+            self.explicit_io.insert(new);
+        }
     }
 
     /// Returns the total [`Products`] assuming recipes are running at certain speeds.
@@ -303,5 +311,9 @@ impl WeightedSpeeds {
         }
 
         Self { speeds }
+    }
+
+    pub fn speeds(&self) -> &[Rational] {
+        &self.speeds
     }
 }
