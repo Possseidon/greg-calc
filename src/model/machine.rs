@@ -225,19 +225,21 @@ impl<'de> Deserialize<'de> for ClockedMachine {
 
 #[derive(Debug, Hash, PartialOrd, Ord, Enum, EnumSetType)]
 pub enum Voltage {
-    /// Up to `8EU/t`.
     UltraLow,
-    /// Up to `32EU/t`.
     Low,
-    /// Up to `128EU/t`.
     Medium,
-    /// Up to `512EU/t`.
     High,
-    /// Up to `2048EU/t`.
     Extreme,
-    // TODO: rest...
-    /// Up to what?
-    Max,
+    Insane,
+    Ludicrous,
+    Zpm,
+    Ultimate,
+    HighlyUltimate,
+    ExtremelyUltimate,
+    InsanelyUltimate,
+    ExtendedMegaUltimate,
+    Overpowered,
+    Maximum,
 }
 
 impl Voltage {
@@ -246,6 +248,15 @@ impl Voltage {
     const MV: &str = "MV";
     const HV: &str = "HV";
     const EV: &str = "EV";
+    const IV: &str = "IV";
+    const LU_V: &str = "LuV";
+    const ZPM: &str = "ZPM";
+    const UV: &str = "UV";
+    const UHV: &str = "UHV";
+    const UEV: &str = "UEV";
+    const UIV: &str = "UIV";
+    const UXV: &str = "UXV";
+    const OP_V: &str = "OpV";
     const MAX: &str = "MAX";
 
     pub const fn as_str(self) -> &'static str {
@@ -255,27 +266,25 @@ impl Voltage {
             Self::Medium => Self::MV,
             Self::High => Self::HV,
             Self::Extreme => Self::EV,
-            Self::Max => Self::MAX,
-        }
-    }
-
-    pub const fn from_index(index: u8) -> Self {
-        match index {
-            0 => Self::UltraLow,
-            1 => Self::Low,
-            2 => Self::Medium,
-            3 => Self::High,
-            4 => Self::Extreme,
-            _ => Self::Max,
+            Self::Insane => Self::IV,
+            Self::Ludicrous => Self::LU_V,
+            Self::Zpm => Self::ZPM,
+            Self::Ultimate => Self::UV,
+            Self::HighlyUltimate => Self::UHV,
+            Self::ExtremelyUltimate => Self::UEV,
+            Self::InsanelyUltimate => Self::UIV,
+            Self::ExtendedMegaUltimate => Self::UXV,
+            Self::Overpowered => Self::OP_V,
+            Self::Maximum => Self::MAX,
         }
     }
 
     pub fn from_eu_per_tick(eu_per_tick: NonZeroU64) -> Self {
-        Self::from_index(
+        Self::from_usize(
             (eu_per_tick.ilog2().saturating_sub(3))
                 .div_ceil(2)
                 .try_into()
-                .unwrap_or(u8::MAX),
+                .unwrap_or(usize::MAX),
         )
     }
 
@@ -341,7 +350,16 @@ impl FromStr for Voltage {
             Self::MV => Ok(Self::Medium),
             Self::HV => Ok(Self::High),
             Self::EV => Ok(Self::Extreme),
-            Self::MAX => Ok(Self::Max),
+            Self::IV => Ok(Self::Insane),
+            Self::LU_V => Ok(Self::Ludicrous),
+            Self::ZPM => Ok(Self::Zpm),
+            Self::UV => Ok(Self::Ultimate),
+            Self::UHV => Ok(Self::HighlyUltimate),
+            Self::UEV => Ok(Self::ExtremelyUltimate),
+            Self::UIV => Ok(Self::InsanelyUltimate),
+            Self::UXV => Ok(Self::ExtendedMegaUltimate),
+            Self::OP_V => Ok(Self::Overpowered),
+            Self::MAX => Ok(Self::Maximum),
             _ => Err(VoltageFromStrError),
         }
     }

@@ -789,8 +789,7 @@ fn setup_selector(action: &mut Option<SetupAction>) -> impl FnOnce(&mut Ui) + '_
                     clocked_machine = Some(ClockedMachine::new(tier));
                 }
                 ui.separator();
-                for underclocking in (0..tier_index).rev() {
-                    let underclocking = Voltage::from_usize(underclocking);
+                for underclocking in (0..tier_index).rev().map(Voltage::from_usize) {
                     if ui.button(format!("🏭{tier}⤵{underclocking}")).clicked() {
                         clocked_machine =
                             Some(ClockedMachine::with_underclocking(tier, underclocking));
