@@ -7,7 +7,7 @@ use std::{
 
 use egui::{
     text::{CCursor, CCursorRange},
-    Align, DragValue, Layout, Response, Sense, Separator, TextEdit, Ui, Widget,
+    Align, DragValue, Layout, Response, Separator, TextEdit, Ui, Widget,
 };
 use egui_extras::{Column, TableBuilder};
 use enum_map::{Enum, EnumMap};
