@@ -23,8 +23,8 @@ thiserror = "2.0.4"
 env_logger = "0.11.5"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen-futures = "0.4.47"
-web-sys = "0.3.74"
+wasm-bindgen-futures = "0.4.49"
+web-sys = "0.3.76"
 
 [profile.release]
 opt-level = 2 # fast and small wasm
