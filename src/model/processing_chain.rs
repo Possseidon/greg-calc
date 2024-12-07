@@ -5,6 +5,7 @@ use std::{
 
 use bitvec::vec::BitVec;
 use itertools::Itertools;
+use log::debug;
 use malachite::{
     num::basic::traits::{One, Zero},
     Rational,
@@ -79,9 +80,9 @@ impl ProcessingChain {
     }
 
     /// Returns the total [`Products`] assuming all machines are running at normal speed.
-    pub fn products_with_max_speeds(&self) -> Products {
-        let speed = Rational::ONE;
-        self.products_with_speed_callback(|_| &speed)
+    pub fn products_with_unthrottled_speeds(&self) -> Products {
+        let unthrottled_speed = Rational::ONE;
+        self.products_with_speed_callback(|_| &unthrottled_speed)
     }
 
     /// Returns the total [`Products`] assuming recipes are running at the given `speeds`.
@@ -240,7 +241,11 @@ impl Speeds {
     ///
     /// Any [`Setup`]s with a [`MachinePowerError`] are ignored.
     fn new(processing_chain: &ProcessingChain) -> Self {
-        let processing_chains = processing_chain.setups.len();
+        let setups_len = processing_chain.setups.len();
+        let explicit_io_len = processing_chain.explicit_io.len();
+        debug!("Calculating speeds for {setups_len} setups ignoring {explicit_io_len} products.");
+
+        let processing_chains = setups_len;
 
         let setup_products_per_sec = processing_chain
             .setups
@@ -291,9 +296,12 @@ pub struct WeightedSpeeds {
 
 impl WeightedSpeeds {
     fn new(speeds: &Speeds, setups: &[Setup]) -> Self {
+        let setups_len = setups.len();
+        debug!("Calculating weighted speeds for {setups_len} setups.");
+
         let mut speeds = speeds
             .speeds
-            .chunks_exact(setups.len())
+            .chunks_exact(setups_len)
             .zip(
                 speeds
                     .weighted_setups
@@ -301,7 +309,7 @@ impl WeightedSpeeds {
                     .map(|index| &setups[index]),
             )
             .fold(
-                vec![Rational::ONE; setups.len()],
+                vec![Rational::ONE; setups_len],
                 |mut acc, (speeds, setup)| {
                     for (acc_speed, speed) in acc.iter_mut().zip_eq(speeds) {
                         *acc_speed *= speed * Rational::from(setup.weight.0);

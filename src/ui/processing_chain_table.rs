@@ -1,7 +1,7 @@
 use std::{
     cell::OnceCell,
     cmp::Ordering,
-    iter::{self, once, once_with},
+    iter::{self, once, once_with, repeat_n},
     num::NonZeroU64,
 };
 
@@ -13,6 +13,7 @@ use egui_extras::{Column, TableBuilder};
 use enum_map::{Enum, EnumMap};
 use enumset::{enum_set, EnumSet, EnumSetType};
 use itertools::Itertools;
+use log::debug;
 use malachite::{
     num::{
         basic::traits::{One, Zero},
@@ -63,7 +64,7 @@ impl ProcessingChainTable {
             .header(HEADER_HEIGHT, |mut header| {
                 for column in columns {
                     header.col(|ui| {
-                        ui.heading(column.header(view_mode))
+                        ui.heading(column.header())
                             .on_hover_text(column.header_hover(view_mode));
                     });
                 }
@@ -132,10 +133,19 @@ impl ProcessingChainTable {
         view_mode: ViewMode,
     ) -> &'a [TableRow] {
         rows[view_mode].get_or_init(|| {
+            let count = processing_chain.setups().len();
+            debug!("Building {view_mode:?} table rows for {count} setups.");
+
+            let unthrottled_speed = Rational::ONE;
+            let speeds: &mut dyn Iterator<Item = _> = match view_mode {
+                ViewMode::Recipe | ViewMode::Setup => &mut repeat_n(&unthrottled_speed, count),
+                ViewMode::Speed => &mut processing_chain.weighted_speeds().speeds().iter(),
+            };
+
             processing_chain
                 .setups()
                 .iter()
-                .zip_eq(processing_chain.weighted_speeds().speeds())
+                .zip_eq(speeds)
                 .enumerate()
                 .flat_map(|(index, (setup, speed))| {
                     TableRow::from_setup(view_mode, index, setup, speed)
@@ -164,14 +174,6 @@ impl ViewMode {
             ViewMode::Recipe => "Recipe",
             ViewMode::Setup => "Setup",
             ViewMode::Speed => "Speed",
-        }
-    }
-
-    const fn count_header(self) -> &'static str {
-        match self {
-            ViewMode::Recipe => "📦/🔄",
-            ViewMode::Setup => "📦/sec",
-            ViewMode::Speed => "📦/sec",
         }
     }
 
@@ -270,45 +272,31 @@ impl TableRow {
 
         let mut speed_col = once(SetupTableCellContent::Speed);
 
-        const FULL_SPEED: &Rational = &Rational::ONE;
-
         let mut consumed_col =
             (0..setup.recipe.consumed.len()).map(|index| SetupTableCellContent::Consumed { index });
-        let mut consumed_count_col: Box<dyn Iterator<Item = _>> = match view_mode {
-            ViewMode::Recipe => Box::new(
-                (0..setup.recipe.consumed.len())
-                    .map(|index| SetupTableCellContent::ConsumedCount { index }),
-            ),
-            ViewMode::Setup => Box::new(SetupTableCellContent::product_amounts(
-                &setup.recipe.consumed,
-                setup,
-                FULL_SPEED,
-            )),
-            ViewMode::Speed => Box::new(SetupTableCellContent::product_amounts(
-                &setup.recipe.consumed,
-                setup,
-                speed,
-            )),
-        };
+        let mut consumed_count_col: Box<dyn Iterator<Item = _>> =
+            match view_mode {
+                ViewMode::Recipe => Box::new(
+                    (0..setup.recipe.consumed.len())
+                        .map(|index| SetupTableCellContent::ConsumedCount { index }),
+                ),
+                ViewMode::Setup | ViewMode::Speed => Box::new(
+                    SetupTableCellContent::product_amounts(&setup.recipe.consumed, setup, speed),
+                ),
+            };
 
         let mut produced_col =
             (0..setup.recipe.produced.len()).map(|index| SetupTableCellContent::Produced { index });
-        let mut produced_count_col: Box<dyn Iterator<Item = _>> = match view_mode {
-            ViewMode::Recipe => Box::new(
-                (0..setup.recipe.produced.len())
-                    .map(|index| SetupTableCellContent::ProducedCount { index }),
-            ),
-            ViewMode::Setup => Box::new(SetupTableCellContent::product_amounts(
-                &setup.recipe.produced,
-                setup,
-                FULL_SPEED,
-            )),
-            ViewMode::Speed => Box::new(SetupTableCellContent::product_amounts(
-                &setup.recipe.produced,
-                setup,
-                speed,
-            )),
-        };
+        let mut produced_count_col: Box<dyn Iterator<Item = _>> =
+            match view_mode {
+                ViewMode::Recipe => Box::new(
+                    (0..setup.recipe.produced.len())
+                        .map(|index| SetupTableCellContent::ProducedCount { index }),
+                ),
+                ViewMode::Setup | ViewMode::Speed => Box::new(
+                    SetupTableCellContent::product_amounts(&setup.recipe.produced, setup, speed),
+                ),
+            };
 
         let mut time_col = once(SetupTableCellContent::Time);
 
@@ -361,7 +349,7 @@ impl TableRow {
     ) -> impl Iterator<Item = Self> {
         let products = match view_mode {
             ViewMode::Recipe => None,
-            ViewMode::Setup => Some(processing_chain.products_with_max_speeds()),
+            ViewMode::Setup => Some(processing_chain.products_with_unthrottled_speeds()),
             ViewMode::Speed => {
                 Some(processing_chain.products_with_speeds(processing_chain.weighted_speeds()))
             }
@@ -447,16 +435,16 @@ enum TableColumn {
 }
 
 impl TableColumn {
-    fn header(self, view_mode: ViewMode) -> &'static str {
+    fn header(self) -> &'static str {
         match self {
             Self::Machine => "Machine 🏭",
             Self::Catalysts => "Catalysts 🔥",
             Self::Setup => "Setup 📜",
             Self::Speed => "Speed ⏱",
             Self::Consumed => "Consumed",
-            Self::ConsumedCount => view_mode.count_header(),
+            Self::ConsumedCount => "📦",
             Self::Produced => "Produced",
-            Self::ProducedCount => view_mode.count_header(),
+            Self::ProducedCount => "📦",
             Self::Time => "Time 🔄",
             Self::Eu => "Power ⚡",
         }
@@ -519,7 +507,7 @@ impl TableCell {
             Self::Setup { index, content } => content
                 .show(
                     &processing_chain.setups()[*index],
-                    &processing_chain.weighted_speeds().speeds()[*index],
+                    || &processing_chain.weighted_speeds().speeds()[*index],
                     editing_buffer,
                     ui,
                 )
@@ -571,10 +559,10 @@ impl SetupTableCellContent {
         })
     }
 
-    fn show(
+    fn show<'a>(
         &self,
-        setup: &Setup,
-        speed: &Rational,
+        setup: &'a Setup,
+        speed: impl FnOnce() -> &'a Rational,
         editing_buffer: &mut Option<EditingBuffer>,
         ui: &mut Ui,
     ) -> Option<SetupProperty> {
@@ -612,7 +600,7 @@ impl SetupTableCellContent {
             }
             Self::Time => editable_time(&setup.recipe, ui),
             Self::Speed => {
-                let speed_percent = speed * Rational::from(100);
+                let speed_percent = speed() * Rational::from(100);
                 let mut options = ToSciOptions::default();
                 options.set_scale(2);
                 ui.label(format!("{}%", speed_percent.to_sci_with_options(options)));
@@ -782,11 +770,11 @@ fn editable_count(
 fn product_amount(ui: &mut Ui, amount: &Rational) {
     let mut options = ToSciOptions::default();
     options.set_scale(2);
-    ui.label(amount.to_sci_with_options(options).to_string())
+    ui.label(format!("{}/s", amount.to_sci_with_options(options)))
         .on_hover_ui(|ui| {
             ui.set_max_width(ui.spacing().tooltip_width);
             let (count, sec) = amount.numerator_and_denominator_ref();
-            ui.label(format!("{count} 📦 / {sec} sec"));
+            ui.label(format!("{count} 📦 / {sec} s"));
         });
 }
 
@@ -796,7 +784,7 @@ fn editable_time(recipe: &Recipe, ui: &mut Ui) -> Option<SetupProperty> {
         DragValue::new(&mut ticks)
             .custom_parser(|text| text.parse::<f64>().ok().map(|value| value * 20.0))
             .custom_formatter(|value, _| (value / 20.0).to_string())
-            .suffix(" sec"),
+            .suffix(" s"),
     );
     (ticks != recipe.ticks).then_some(SetupProperty::SetTime { ticks })
 }
@@ -847,7 +835,7 @@ impl Action {
             Action::SetupProperty { index, property } => property.apply(processing_chain, index),
             Action::ReplaceProduct { old, new } => {
                 processing_chain.replace_product(&old, new);
-                ViewMode::CALCULATED
+                ViewMode::ALL
             }
         }
     }
