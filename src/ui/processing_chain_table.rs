@@ -7,7 +7,7 @@ use std::{
 
 use egui::{
     text::{CCursor, CCursorRange},
-    Align, DragValue, Layout, Response, Separator, TextEdit, Ui, Widget,
+    Align, DragValue, Layout, Response, Sense, Separator, TextEdit, Ui, Widget,
 };
 use egui_extras::{Column, TableBuilder};
 use enum_map::{Enum, EnumMap};
@@ -23,7 +23,7 @@ use malachite::{
 };
 
 use crate::model::{
-    machine::{ClockedMachine, Machines},
+    machine::{ClockedMachine, ClockedMachines, Machines, Voltage},
     processing_chain::{ProcessingChain, Setup},
     recipe::{Machine, Product, ProductCount, Recipe},
 };
@@ -94,7 +94,7 @@ impl ProcessingChainTable {
                                             cell.show(ui, &self.processing_chain, editing_buffer)
                                         {
                                             action.get_or_insert(new_action);
-                                        };
+                                        }
 
                                         if tmp_editing_buffer.is_some() {
                                             self.editing_cell =
@@ -274,29 +274,33 @@ impl TableRow {
 
         let mut consumed_col =
             (0..setup.recipe.consumed.len()).map(|index| SetupTableCellContent::Consumed { index });
-        let mut consumed_count_col: Box<dyn Iterator<Item = _>> =
-            match view_mode {
-                ViewMode::Recipe => Box::new(
-                    (0..setup.recipe.consumed.len())
-                        .map(|index| SetupTableCellContent::ConsumedCount { index }),
-                ),
-                ViewMode::Setup | ViewMode::Speed => Box::new(
-                    SetupTableCellContent::product_amounts(&setup.recipe.consumed, setup, speed),
-                ),
-            };
+        let mut consumed_count_col: Box<dyn Iterator<Item = _>> = match view_mode {
+            ViewMode::Recipe => Box::new(
+                (0..setup.recipe.consumed.len())
+                    .map(|index| SetupTableCellContent::ConsumedCount { index }),
+            ),
+            ViewMode::Setup | ViewMode::Speed => Box::new(SetupTableCellContent::product_amounts(
+                &setup.recipe.consumed,
+                setup,
+                speed,
+                |index, amount| SetupTableCellContent::ConsumedAmount { index, amount },
+            )),
+        };
 
         let mut produced_col =
             (0..setup.recipe.produced.len()).map(|index| SetupTableCellContent::Produced { index });
-        let mut produced_count_col: Box<dyn Iterator<Item = _>> =
-            match view_mode {
-                ViewMode::Recipe => Box::new(
-                    (0..setup.recipe.produced.len())
-                        .map(|index| SetupTableCellContent::ProducedCount { index }),
-                ),
-                ViewMode::Setup | ViewMode::Speed => Box::new(
-                    SetupTableCellContent::product_amounts(&setup.recipe.produced, setup, speed),
-                ),
-            };
+        let mut produced_count_col: Box<dyn Iterator<Item = _>> = match view_mode {
+            ViewMode::Recipe => Box::new(
+                (0..setup.recipe.produced.len())
+                    .map(|index| SetupTableCellContent::ProducedCount { index }),
+            ),
+            ViewMode::Setup | ViewMode::Speed => Box::new(SetupTableCellContent::product_amounts(
+                &setup.recipe.produced,
+                setup,
+                speed,
+                |index, amount| SetupTableCellContent::ProducedAmount { index, amount },
+            )),
+        };
 
         let mut time_col = once(SetupTableCellContent::Time);
 
@@ -511,9 +515,9 @@ impl TableCell {
                     editing_buffer,
                     ui,
                 )
-                .map(|property| Action::SetupProperty {
+                .map(|action| Action::Setup {
                     index: *index,
-                    property,
+                    action,
                 }),
             Self::Total { content } => {
                 content.show(ui);
@@ -535,9 +539,10 @@ enum SetupTableCellContent {
     EuPerTick(Box<Rational>),
     Produced { index: usize },
     Consumed { index: usize },
-    ProducedCount { index: usize },
     ConsumedCount { index: usize },
-    ProductAmount(Box<Rational>),
+    ProducedCount { index: usize },
+    ConsumedAmount { index: usize, amount: Box<Rational> },
+    ProducedAmount { index: usize, amount: Box<Rational> },
     PowerError,
 }
 
@@ -546,17 +551,24 @@ impl SetupTableCellContent {
         product_counts: &'a [ProductCount],
         setup: &'a Setup,
         speed: &'a Rational,
+        new: impl Fn(usize, Box<Rational>) -> Self + 'a,
     ) -> impl Iterator<Item = Self> + 'a {
-        product_counts.iter().map(move |product_count| {
-            match setup.machines.speed_factor(setup.recipe.voltage()) {
-                Ok(speed_factor) => Self::ProductAmount(Box::new(
-                    Rational::from(product_count.count.get()) / setup.recipe.seconds()
-                        * speed_factor
-                        * speed,
-                )),
-                Err(_) => Self::PowerError,
-            }
-        })
+        product_counts
+            .iter()
+            .enumerate()
+            .map(move |(index, product_count)| {
+                match setup.machines.speed_factor(setup.recipe.voltage()) {
+                    Ok(speed_factor) => new(
+                        index,
+                        Box::new(
+                            Rational::from(product_count.count.get()) / setup.recipe.seconds()
+                                * speed_factor
+                                * speed,
+                        ),
+                    ),
+                    Err(_) => Self::PowerError,
+                }
+            })
     }
 
     fn show<'a>(
@@ -565,7 +577,7 @@ impl SetupTableCellContent {
         speed: impl FnOnce() -> &'a Rational,
         editing_buffer: &mut Option<EditingBuffer>,
         ui: &mut Ui,
-    ) -> Option<SetupProperty> {
+    ) -> Option<SetupAction> {
         match self {
             Self::Machine => editable_machine(&setup.recipe.machine, editing_buffer, ui),
             Self::Catalyst { index } => editable_product(
@@ -577,23 +589,14 @@ impl SetupTableCellContent {
             ),
             Self::SetupEco => {
                 if let Machines::Eco(count) = setup.machines {
-                    ui.label(format!("🏭 ×{count}"));
-                    None
+                    editable_eco_machine(count, ui)
                 } else {
                     unreachable!();
                 }
             }
             Self::SetupPower { clocked_machine } => {
                 if let Machines::Power(clocked_machines) = &setup.machines {
-                    let count = clocked_machines.machines[clocked_machine];
-                    let tier = clocked_machine.tier();
-                    let underclocking = clocked_machine.underclocking();
-                    if tier == underclocking {
-                        ui.label(format!("🏭{tier} ×{count}"));
-                    } else {
-                        ui.label(format!("🏭{tier}⤵{underclocking} ×{count}"));
-                    }
-                    None
+                    editable_power_machine(clocked_machines, *clocked_machine, ui)
                 } else {
                     unreachable!();
                 }
@@ -611,13 +614,6 @@ impl SetupTableCellContent {
                 eu_per_tick(ui, eu);
                 None
             }
-            Self::Produced { index } => editable_product(
-                &setup.recipe.produced[*index].product,
-                editing_buffer,
-                *index,
-                ProductKind::Produced,
-                ui,
-            ),
             Self::Consumed { index } => editable_product(
                 &setup.recipe.consumed[*index].product,
                 editing_buffer,
@@ -625,25 +621,44 @@ impl SetupTableCellContent {
                 ProductKind::Consumed,
                 ui,
             ),
-            Self::ProducedCount { index } => {
-                editable_count(setup.recipe.produced[*index].count, ui, |count| {
-                    SetupProperty::SetProducedCount {
-                        index: *index,
-                        count,
-                    }
-                })
-            }
+            Self::Produced { index } => editable_product(
+                &setup.recipe.produced[*index].product,
+                editing_buffer,
+                *index,
+                ProductKind::Produced,
+                ui,
+            ),
             Self::ConsumedCount { index } => {
                 editable_count(setup.recipe.consumed[*index].count, ui, |count| {
-                    SetupProperty::SetConsumedCount {
+                    SetupAction::SetConsumedCount {
                         index: *index,
                         count,
                     }
                 })
             }
-            Self::ProductAmount(amount) => {
-                product_amount(ui, amount);
-                None
+            Self::ProducedCount { index } => {
+                editable_count(setup.recipe.produced[*index].count, ui, |count| {
+                    SetupAction::SetProducedCount {
+                        index: *index,
+                        count,
+                    }
+                })
+            }
+            Self::ConsumedAmount { index, amount } => {
+                editable_amount(setup.recipe.consumed[*index].count, amount, ui, |count| {
+                    SetupAction::SetConsumedCount {
+                        index: *index,
+                        count,
+                    }
+                })
+            }
+            Self::ProducedAmount { index, amount } => {
+                editable_amount(setup.recipe.produced[*index].count, amount, ui, |count| {
+                    SetupAction::SetProducedCount {
+                        index: *index,
+                        count,
+                    }
+                })
             }
             Self::PowerError => {
                 ui.label("⚠")
@@ -658,10 +673,75 @@ impl SetupTableCellContent {
     }
 }
 
-fn editable_eu_per_tick(eu_per_tick: i64, ui: &mut Ui) -> Option<SetupProperty> {
+fn editable_power_machine(
+    clocked_machines: &ClockedMachines,
+    clocked_machine: ClockedMachine,
+    ui: &mut Ui,
+) -> Option<SetupAction> {
+    let old_count = clocked_machines.machines[&clocked_machine];
+    let mut count = old_count;
+
+    let tier = clocked_machine.tier();
+    let underclocking = clocked_machine.underclocking();
+
+    let mut action = None;
+    ui.add(DragValue::new(&mut count).prefix(if tier == underclocking {
+        format!("🏭{tier} ×")
+    } else {
+        format!("🏭{tier}⤵{underclocking} ×")
+    }))
+    .context_menu(|ui| {
+        ui.menu_button("🏭 Add", setup_selector(&mut action));
+        ui.separator();
+        if ui.button("❌ Remove").clicked() {
+            ui.close_menu();
+            action = Some(SetupAction::SetMachineCount {
+                clocked_machine: Some(clocked_machine),
+                count: 0,
+            });
+        }
+    });
+
+    if count != old_count {
+        action = Some(SetupAction::SetMachineCount {
+            clocked_machine: Some(clocked_machine),
+            count: count.into(),
+        });
+    }
+
+    action
+}
+
+fn editable_eco_machine(count: u64, ui: &mut Ui) -> Option<SetupAction> {
+    let mut new_count = count;
+    let mut action = None;
+    ui.add(DragValue::new(&mut new_count).prefix("🏭 ×"))
+        .context_menu(|ui| {
+            ui.menu_button("📜 Add", setup_selector(&mut action));
+            ui.separator();
+            if ui.button("❌ Remove").clicked() {
+                ui.close_menu();
+                action = Some(SetupAction::SetMachineCount {
+                    clocked_machine: None,
+                    count: 0,
+                });
+            }
+        });
+
+    if new_count != count {
+        action = Some(SetupAction::SetMachineCount {
+            clocked_machine: None,
+            count: new_count,
+        });
+    }
+
+    action
+}
+
+fn editable_eu_per_tick(eu_per_tick: i64, ui: &mut Ui) -> Option<SetupAction> {
     let mut new_eu_per_tick = eu_per_tick;
     ui.add(DragValue::new(&mut new_eu_per_tick).suffix(" EU/t"));
-    (new_eu_per_tick != eu_per_tick).then_some(SetupProperty::SetEuPerTick {
+    (new_eu_per_tick != eu_per_tick).then_some(SetupAction::SetEuPerTick {
         eu_per_tick: new_eu_per_tick,
     })
 }
@@ -685,13 +765,110 @@ fn eu_per_tick(ui: &mut Ui, eu: &Rational) {
         });
 }
 
+fn setup_selector(action: &mut Option<SetupAction>) -> impl FnOnce(&mut Ui) + '_ {
+    |ui| {
+        if ui.button("🏭 Eco").clicked() {
+            *action = Some(SetupAction::InsertMachine {
+                clocked_machine: None,
+            });
+        }
+
+        ui.separator();
+
+        let mut clocked_machine = None;
+        if ui.button(format!("🏭{}", Voltage::UltraLow)).clicked() {
+            clocked_machine = Some(ClockedMachine::new(Voltage::UltraLow));
+        }
+        if ui.button(format!("🏭{}", Voltage::Low)).clicked() {
+            clocked_machine = Some(ClockedMachine::new(Voltage::Low));
+        }
+        for tier_index in 2..Voltage::LENGTH {
+            let tier = Voltage::from_usize(tier_index);
+            ui.menu_button(format!("🏭{tier}"), |ui| {
+                if ui.button(format!("🏭{tier}")).clicked() {
+                    clocked_machine = Some(ClockedMachine::new(tier));
+                }
+                ui.separator();
+                for underclocking in (0..tier_index).rev() {
+                    let underclocking = Voltage::from_usize(underclocking);
+                    if ui.button(format!("🏭{tier}⤵{underclocking}")).clicked() {
+                        clocked_machine =
+                            Some(ClockedMachine::with_underclocking(tier, underclocking));
+                    }
+                }
+            });
+        }
+
+        if clocked_machine.is_some() {
+            *action = Some(SetupAction::InsertMachine { clocked_machine });
+        }
+    }
+}
+
 fn editable_machine(
     machine: &Machine,
     editing_buffer: &mut Option<EditingBuffer>,
     ui: &mut Ui,
-) -> Option<SetupProperty> {
-    ui.label(&machine.name);
-    None
+) -> Option<SetupAction> {
+    if let Some(action) = editable_text(
+        editing_buffer,
+        &machine.name,
+        ui,
+        SetupAction::Remove,
+        |name| SetupAction::Rename {
+            machine: Machine { name },
+        },
+    ) {
+        action
+    } else {
+        let label = ui.label(&machine.name);
+        if label.clicked() {
+            *editing_buffer = Some(EditingBuffer {
+                just_opened: true,
+                text: machine.name.clone(),
+            });
+        }
+
+        let mut action = None;
+        label.context_menu(|ui| {
+            if ui.button("🏭 Insert Machine").clicked() {
+                ui.close_menu();
+                action = Some(SetupAction::Insert {
+                    machine: Machine { name: "New".into() },
+                });
+            }
+            ui.separator();
+            ui.menu_button("📦 Add Product", |ui| {
+                let mut kind = None;
+                if ui.button("📦 Consumed").clicked() {
+                    kind = Some(ProductKind::Consumed);
+                }
+                if ui.button("📦 Produced").clicked() {
+                    kind = Some(ProductKind::Produced);
+                }
+                ui.separator();
+                if ui.button("🔥 Catalyst").clicked() {
+                    kind = Some(ProductKind::Catalyst);
+                }
+                if let Some(kind) = kind {
+                    ui.close_menu();
+                    action = Some(SetupAction::InsertProduct {
+                        kind,
+                        index: None,
+                        product: Product { name: "New".into() },
+                    });
+                }
+            });
+            ui.menu_button("📜 Add Setup", setup_selector(&mut action));
+            ui.separator();
+            if ui.button("❌ Remove").clicked() {
+                ui.close_menu();
+                action = Some(SetupAction::Remove);
+            }
+        });
+
+        action
+    }
 }
 
 fn editable_product(
@@ -700,7 +877,61 @@ fn editable_product(
     index: usize,
     kind: ProductKind,
     ui: &mut Ui,
-) -> Option<SetupProperty> {
+) -> Option<SetupAction> {
+    if let Some(action) = editable_text(
+        editing_buffer,
+        &product.name,
+        ui,
+        SetupAction::RemoveProduct { kind, index },
+        |name| SetupAction::RenameProduct {
+            kind,
+            index,
+            product: Product { name },
+        },
+    ) {
+        action
+    } else {
+        let label = ui.label(&product.name);
+        if label.clicked() {
+            *editing_buffer = Some(EditingBuffer {
+                just_opened: true,
+                text: product.name.clone(),
+            });
+        }
+
+        let mut action = None;
+        label.context_menu(|ui| {
+            if ui
+                .button(match kind {
+                    ProductKind::Catalyst => "🔥 Insert",
+                    ProductKind::Consumed | ProductKind::Produced => "📦 Insert",
+                })
+                .clicked()
+            {
+                ui.close_menu();
+                action = Some(SetupAction::InsertProduct {
+                    kind,
+                    index: Some(index),
+                    product: Product { name: "New".into() },
+                });
+            }
+            ui.separator();
+            if ui.button("❌ Remove").clicked() {
+                ui.close_menu();
+                action = Some(SetupAction::RemoveProduct { kind, index });
+            }
+        });
+        action
+    }
+}
+
+fn editable_text(
+    editing_buffer: &mut Option<EditingBuffer>,
+    old_text: &str,
+    ui: &mut Ui,
+    remove_action: SetupAction,
+    rename_action: impl FnOnce(String) -> SetupAction,
+) -> Option<Option<SetupAction>> {
     if let Some(EditingBuffer { just_opened, text }) = editing_buffer {
         let mut edit = TextEdit::singleline(text).show(ui);
         if *just_opened {
@@ -717,68 +948,59 @@ fn editable_product(
             let new_product_name = editing_buffer.take().expect("should be set").text;
             let trimmed_product_name = new_product_name.trim();
             if trimmed_product_name.is_empty() {
-                return Some(SetupProperty::RemoveProduct { kind, index });
+                return Some(Some(remove_action));
             }
 
-            if trimmed_product_name != product.name {
-                return Some(SetupProperty::RenameProduct {
-                    kind,
-                    index,
-                    product: Product {
-                        name: if trimmed_product_name.len() == new_product_name.len() {
-                            new_product_name
-                        } else {
-                            trimmed_product_name.to_string()
-                        },
+            if trimmed_product_name != old_text {
+                return Some(Some(rename_action(
+                    if trimmed_product_name.len() == new_product_name.len() {
+                        new_product_name
+                    } else {
+                        trimmed_product_name.to_string()
                     },
-                });
+                )));
             }
         }
-    } else {
-        let label = ui.label(&product.name);
-        if label.clicked() {
-            *editing_buffer = Some(EditingBuffer {
-                just_opened: true,
-                text: product.name.to_string(),
-            });
-        }
-        let mut action = None;
-        label.context_menu(|ui| {
-            if ui.button("Remove").clicked() {
-                ui.close_menu();
-                action = Some(SetupProperty::RemoveProduct { kind, index });
-            }
-        });
-        if action.is_some() {
-            return action;
-        }
-    }
 
-    None
+        Some(None)
+    } else {
+        None
+    }
 }
 
 fn editable_count(
     count: NonZeroU64,
     ui: &mut Ui,
-    into_property: impl FnOnce(NonZeroU64) -> SetupProperty,
-) -> Option<SetupProperty> {
+    into_action: impl FnOnce(NonZeroU64) -> SetupAction,
+) -> Option<SetupAction> {
     let mut new_count = count;
     ui.add(DragValue::new(&mut new_count).prefix("×"));
-    (new_count != count).then(|| into_property(new_count))
+    (new_count != count).then(|| into_action(new_count))
 }
 
-fn product_amount(ui: &mut Ui, amount: &Rational) {
+fn editable_amount(
+    count: NonZeroU64,
+    amount: &Rational,
+    ui: &mut Ui,
+    into_action: impl FnOnce(NonZeroU64) -> SetupAction,
+) -> Option<SetupAction> {
+    let mut action = None;
     let mut options = ToSciOptions::default();
     options.set_scale(2);
     ui.label(format!("{}/s", amount.to_sci_with_options(options)))
         .on_hover_ui(|ui| {
             ui.set_max_width(ui.spacing().tooltip_width);
-            let (count, sec) = amount.numerator_and_denominator_ref();
-            ui.label(format!("{count} 📦 / {sec} s"));
+            let (products, sec) = amount.numerator_and_denominator_ref();
+            ui.label(format!("{products} 📦 / {sec} s"));
+            ui.label("Right-click to edit recipe count.");
+        })
+        .context_menu(|ui| {
+            action = editable_count(count, ui, into_action);
         });
+    action
 }
 
-fn editable_time(recipe: &Recipe, ui: &mut Ui) -> Option<SetupProperty> {
+fn editable_time(recipe: &Recipe, ui: &mut Ui) -> Option<SetupAction> {
     let mut ticks = recipe.ticks;
     ui.add(
         DragValue::new(&mut ticks)
@@ -786,7 +1008,7 @@ fn editable_time(recipe: &Recipe, ui: &mut Ui) -> Option<SetupProperty> {
             .custom_formatter(|value, _| (value / 20.0).to_string())
             .suffix(" s"),
     );
-    (ticks != recipe.ticks).then_some(SetupProperty::SetTime { ticks })
+    (ticks != recipe.ticks).then_some(SetupAction::SetTime { ticks })
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -808,7 +1030,10 @@ impl TotalTableCellContent {
                 ui.label(&product.name);
             }
             Self::ProductAmount(amount) => {
-                product_amount(ui, amount);
+                let mut options = ToSciOptions::default();
+                options.set_scale(2);
+                ui.label(format!("{}/s", amount.to_sci_with_options(options)));
+                // TODO: on_hover like for editable_amount
             }
             Self::EuPerTick(eu) => eu_per_tick(ui, eu),
         }
@@ -816,14 +1041,8 @@ impl TotalTableCellContent {
 }
 
 enum Action {
-    SetupProperty {
-        index: usize,
-        property: SetupProperty,
-    },
-    ReplaceProduct {
-        old: Product,
-        new: Product,
-    },
+    Setup { index: usize, action: SetupAction },
+    ReplaceProduct { old: Product, new: Product },
 }
 
 impl Action {
@@ -832,8 +1051,8 @@ impl Action {
     /// Returns which cached [`ProcessingChainTable::rows`] need to be invalidated.
     fn execute(self, processing_chain: &mut ProcessingChain) -> EnumSet<ViewMode> {
         match self {
-            Action::SetupProperty { index, property } => property.apply(processing_chain, index),
-            Action::ReplaceProduct { old, new } => {
+            Self::Setup { index, action } => action.apply(processing_chain, index),
+            Self::ReplaceProduct { old, new } => {
                 processing_chain.replace_product(&old, new);
                 ViewMode::ALL
             }
@@ -841,19 +1060,28 @@ impl Action {
     }
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 enum ProductKind {
     Catalyst,
     Consumed,
     Produced,
 }
 
-enum SetupProperty {
-    SetMachine {
+enum SetupAction {
+    Insert {
+        machine: Machine,
+    },
+    Remove,
+    Move {
+        to: usize,
+    },
+    Rename {
         machine: Machine,
     },
 
-    AddProduct {
+    InsertProduct {
         kind: ProductKind,
+        index: Option<usize>,
         product: Product,
     },
     RemoveProduct {
@@ -863,6 +1091,7 @@ enum SetupProperty {
     MoveProduct {
         kind: ProductKind,
         from: usize,
+        to_setup: usize,
         to: usize,
     },
     RenameProduct {
@@ -886,38 +1115,70 @@ enum SetupProperty {
     SetEuPerTick {
         eu_per_tick: i64,
     },
+
+    InsertMachine {
+        clocked_machine: Option<ClockedMachine>,
+    },
+    SetMachineCount {
+        clocked_machine: Option<ClockedMachine>,
+        count: u64,
+    },
 }
 
-impl SetupProperty {
+impl SetupAction {
     fn apply(
         self,
         processing_chain: &mut ProcessingChain,
         setup_index: usize,
     ) -> EnumSet<ViewMode> {
         match self {
-            Self::SetMachine { machine } => {
+            Self::Insert { machine } => {
+                processing_chain
+                    .setups_mut()
+                    .insert(setup_index, Setup::new(machine));
+                ViewMode::ALL
+            }
+            Self::Remove => {
+                processing_chain.setups_mut().remove(setup_index);
+                ViewMode::ALL
+            }
+            Self::Move { to } => {
+                move_item(processing_chain.setups_mut(), setup_index, to);
+                ViewMode::ALL
+            }
+            Self::Rename { machine } => {
                 *processing_chain.machine_mut(setup_index) = machine;
                 ViewMode::NONE
             }
-            Self::AddProduct { kind, product } => {
+            Self::InsertProduct {
+                kind,
+                index,
+                product,
+            } => {
                 match kind {
                     ProductKind::Catalyst => {
-                        processing_chain.catalysts_mut(setup_index).push(product);
+                        insert_or_append(
+                            processing_chain.catalysts_mut(setup_index),
+                            index,
+                            product,
+                        );
                     }
-                    ProductKind::Consumed => processing_chain.setups_mut()[setup_index]
-                        .recipe
-                        .consumed
-                        .push(ProductCount {
+                    ProductKind::Consumed => insert_or_append(
+                        &mut processing_chain.setups_mut()[setup_index].recipe.consumed,
+                        index,
+                        ProductCount {
                             product,
                             count: NonZeroU64::MIN,
-                        }),
-                    ProductKind::Produced => processing_chain.setups_mut()[setup_index]
-                        .recipe
-                        .produced
-                        .push(ProductCount {
+                        },
+                    ),
+                    ProductKind::Produced => insert_or_append(
+                        &mut processing_chain.setups_mut()[setup_index].recipe.produced,
+                        index,
+                        ProductCount {
                             product,
                             count: NonZeroU64::MIN,
-                        }),
+                        },
+                    ),
                 }
                 ViewMode::ALL
             }
@@ -941,24 +1202,58 @@ impl SetupProperty {
                 }
                 ViewMode::ALL
             }
-            Self::MoveProduct { kind, from, to } => {
-                match kind {
-                    ProductKind::Catalyst => {
-                        move_item(processing_chain.catalysts_mut(setup_index), from, to);
+            Self::MoveProduct {
+                kind,
+                from,
+                to_setup,
+                to,
+            } => {
+                if setup_index == to_setup {
+                    match kind {
+                        ProductKind::Catalyst => {
+                            move_item(processing_chain.catalysts_mut(setup_index), from, to);
+                        }
+                        ProductKind::Consumed => {
+                            move_item(
+                                &mut processing_chain.setups_mut()[setup_index].recipe.consumed,
+                                from,
+                                to,
+                            );
+                        }
+                        ProductKind::Produced => {
+                            move_item(
+                                &mut processing_chain.setups_mut()[setup_index].recipe.produced,
+                                from,
+                                to,
+                            );
+                        }
                     }
-                    ProductKind::Consumed => {
-                        move_item(
-                            &mut processing_chain.setups_mut()[setup_index].recipe.consumed,
-                            from,
-                            to,
-                        );
-                    }
-                    ProductKind::Produced => {
-                        move_item(
-                            &mut processing_chain.setups_mut()[setup_index].recipe.produced,
-                            from,
-                            to,
-                        );
+                } else {
+                    match kind {
+                        ProductKind::Catalyst => {
+                            let item = processing_chain.catalysts_mut(setup_index).remove(from);
+                            processing_chain.catalysts_mut(to_setup).insert(to, item);
+                        }
+                        ProductKind::Consumed => {
+                            let item = processing_chain.setups_mut()[setup_index]
+                                .recipe
+                                .consumed
+                                .remove(from);
+                            processing_chain.setups_mut()[to_setup]
+                                .recipe
+                                .consumed
+                                .insert(to, item);
+                        }
+                        ProductKind::Produced => {
+                            let item = processing_chain.setups_mut()[setup_index]
+                                .recipe
+                                .produced
+                                .remove(from);
+                            processing_chain.setups_mut()[to_setup]
+                                .recipe
+                                .produced
+                                .insert(to, item);
+                        }
                     }
                 }
                 ViewMode::NONE
@@ -1001,8 +1296,47 @@ impl SetupProperty {
                     .eu_per_tick = eu_per_tick;
                 ViewMode::CALCULATED
             }
+            Self::InsertMachine { clocked_machine } => {
+                let machines = &mut processing_chain.setups_mut()[setup_index].machines;
+                if let Some(clocked_machine) = clocked_machine {
+                    machines
+                        .into_clocked()
+                        .machines
+                        .entry(clocked_machine)
+                        .and_modify(|count| *count = count.saturating_add(1))
+                        .or_insert(NonZeroU64::MIN);
+                } else {
+                    *machines.into_eco() += 1;
+                }
+                ViewMode::ALL
+            }
+            Self::SetMachineCount {
+                clocked_machine,
+                count,
+            } => {
+                if let Some(clocked_machine) = clocked_machine {
+                    let machines = &mut processing_chain.setups_mut()[setup_index]
+                        .machines
+                        .into_clocked()
+                        .machines;
+                    if let Some(count) = NonZeroU64::new(count) {
+                        machines.insert(clocked_machine, count);
+                    } else {
+                        machines.remove(&clocked_machine);
+                    }
+                } else {
+                    *processing_chain.setups_mut()[setup_index]
+                        .machines
+                        .into_eco() = count;
+                }
+                ViewMode::CALCULATED
+            }
         }
     }
+}
+
+fn insert_or_append<T>(items: &mut Vec<T>, index: Option<usize>, product: T) {
+    items.insert(index.unwrap_or(items.len()), product);
 }
 
 fn move_item<T>(items: &mut [T], from: usize, to: usize) {
