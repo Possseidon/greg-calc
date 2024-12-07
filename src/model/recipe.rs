@@ -21,6 +21,17 @@ pub struct Recipe {
 }
 
 impl Recipe {
+    pub fn new(machine: Machine) -> Self {
+        Self {
+            machine,
+            ticks: NonZeroU64::MIN,
+            eu_per_tick: Default::default(),
+            catalysts: Default::default(),
+            consumed: Default::default(),
+            produced: Default::default(),
+        }
+    }
+
     pub fn total_eu(&self) -> Integer {
         Integer::from(self.ticks.get()) * Integer::from(self.eu_per_tick)
     }
