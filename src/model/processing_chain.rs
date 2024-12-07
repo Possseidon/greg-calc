@@ -307,6 +307,11 @@ impl WeightedSpeeds {
         let setups_len = setups.len();
         debug!("Calculating weighted speeds for {setups_len} setups.");
 
+        if setups.is_empty() {
+            // to avoid chunks_exact being called with 0
+            return Default::default();
+        }
+
         let mut speeds = speeds
             .speeds
             .chunks_exact(setups_len)
