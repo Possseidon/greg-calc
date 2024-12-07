@@ -185,6 +185,14 @@ pub struct Setup {
 }
 
 impl Setup {
+    pub fn new(machine: Machine) -> Self {
+        Self {
+            recipe: Recipe::new(machine),
+            machines: Default::default(),
+            weight: Default::default(),
+        }
+    }
+
     /// How fast this [`Setup`] can process recipes.
     pub fn speed_factor(&self) -> Result<Rational, MachinePowerError> {
         self.machines.speed_factor(self.recipe.voltage())
