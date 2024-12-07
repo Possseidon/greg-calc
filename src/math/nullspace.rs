@@ -8,6 +8,12 @@ use malachite::{
 
 pub fn nullspace(mut matrix: impl AsMut<[Rational]>, columns: usize) -> (BitVec, Vec<Rational>) {
     let matrix = matrix.as_mut();
+
+    if columns == 0 {
+        assert!(matrix.is_empty());
+        return Default::default();
+    }
+
     assert!(matrix.len() % columns == 0);
     let rows = matrix.len() / columns;
 
