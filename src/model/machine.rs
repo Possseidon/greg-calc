@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     collections::BTreeMap,
     fmt,
     num::{NonZeroI64, NonZeroU64},
@@ -6,6 +7,7 @@ use std::{
 };
 
 use enum_map::Enum;
+use enumset::EnumSetType;
 use malachite::{
     num::basic::traits::{One, Zero},
     Integer, Rational,
@@ -51,6 +53,36 @@ impl Machines {
             (Some(_), Self::Eco(_)) => Err(MachinePowerError::RequiresPower),
         }
     }
+
+    pub fn into_clocked(&mut self) -> &mut ClockedMachines {
+        match self {
+            Machines::Power(_) => {}
+            _ => *self = Self::Power(Default::default()),
+        }
+
+        match self {
+            Machines::Power(clocked_machines) => clocked_machines,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn into_eco(&mut self) -> &mut u64 {
+        match self {
+            Machines::Eco(_) => {}
+            _ => *self = Self::Eco(0),
+        }
+
+        match self {
+            Machines::Eco(count) => count,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Default for Machines {
+    fn default() -> Self {
+        Self::Eco(0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Error)]
@@ -61,7 +93,7 @@ pub enum MachinePowerError {
     RequiresPower,
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ClockedMachines {
     #[serde(flatten)]
     pub machines: BTreeMap<ClockedMachine, NonZeroU64>,
@@ -96,7 +128,7 @@ impl ClockedMachines {
 }
 
 /// The tier and clocking of some machine, e.g. a "**HV** Macerator" running at **LV**.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct ClockedMachine {
     /// The [`Voltage`] tier of the machine.
     ///
@@ -110,7 +142,34 @@ pub struct ClockedMachine {
     underclocking: Voltage,
 }
 
+impl PartialOrd for ClockedMachine {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ClockedMachine {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.tier, other.underclocking).cmp(&(other.tier, self.underclocking))
+    }
+}
+
 impl ClockedMachine {
+    pub fn new(tier: Voltage) -> Self {
+        Self {
+            tier,
+            underclocking: tier,
+        }
+    }
+
+    pub fn with_underclocking(tier: Voltage, underclocking: Voltage) -> Self {
+        assert!(underclocking <= tier);
+        Self {
+            tier,
+            underclocking,
+        }
+    }
+
     pub fn tier(&self) -> Voltage {
         self.tier
     }
@@ -164,7 +223,7 @@ impl<'de> Deserialize<'de> for ClockedMachine {
     }
 }
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Enum)]
+#[derive(Debug, Hash, PartialOrd, Ord, Enum, EnumSetType)]
 pub enum Voltage {
     /// Up to `8EU/t`.
     UltraLow,
