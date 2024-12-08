@@ -234,10 +234,10 @@ pub enum Voltage {
     Ludicrous,
     Zpm,
     Ultimate,
-    HighlyUltimate,
-    ExtremelyUltimate,
-    InsanelyUltimate,
-    ExtendedMegaUltimate,
+    UltraHigh,
+    UltraExcessive,
+    UltraImmense,
+    UltraExtreme,
     Overpowered,
     Maximum,
 }
@@ -259,7 +259,7 @@ impl Voltage {
     const OP_V: &str = "OpV";
     const MAX: &str = "MAX";
 
-    pub const fn as_str(self) -> &'static str {
+    pub const fn acronym(self) -> &'static str {
         match self {
             Self::UltraLow => Self::ULV,
             Self::Low => Self::LV,
@@ -270,12 +270,32 @@ impl Voltage {
             Self::Ludicrous => Self::LU_V,
             Self::Zpm => Self::ZPM,
             Self::Ultimate => Self::UV,
-            Self::HighlyUltimate => Self::UHV,
-            Self::ExtremelyUltimate => Self::UEV,
-            Self::InsanelyUltimate => Self::UIV,
-            Self::ExtendedMegaUltimate => Self::UXV,
+            Self::UltraHigh => Self::UHV,
+            Self::UltraExcessive => Self::UEV,
+            Self::UltraImmense => Self::UIV,
+            Self::UltraExtreme => Self::UXV,
             Self::Overpowered => Self::OP_V,
             Self::Maximum => Self::MAX,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::UltraLow => "Ultra Low Voltage",
+            Self::Low => "Low Voltage",
+            Self::Medium => "Medium Voltage",
+            Self::High => "High Voltage",
+            Self::Extreme => "Extreme Voltage",
+            Self::Insane => "Insane Voltage",
+            Self::Ludicrous => "Ludicrous Voltage",
+            Self::Zpm => "ZPM Voltage",
+            Self::Ultimate => "Ultimate Voltage",
+            Self::UltraHigh => "Ultra High Voltage",
+            Self::UltraExcessive => "Ultra Excessive Voltage",
+            Self::UltraImmense => "Ultra Immense Voltage",
+            Self::UltraExtreme => "Ultra Extreme Voltage",
+            Self::Overpowered => "Overpowered Voltage",
+            Self::Maximum => "Maximum Voltage",
         }
     }
 
@@ -332,7 +352,7 @@ impl Voltage {
 
 impl fmt::Display for Voltage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
+        write!(f, "{}", self.acronym())
     }
 }
 
@@ -354,10 +374,10 @@ impl FromStr for Voltage {
             Self::LU_V => Ok(Self::Ludicrous),
             Self::ZPM => Ok(Self::Zpm),
             Self::UV => Ok(Self::Ultimate),
-            Self::UHV => Ok(Self::HighlyUltimate),
-            Self::UEV => Ok(Self::ExtremelyUltimate),
-            Self::UIV => Ok(Self::InsanelyUltimate),
-            Self::UXV => Ok(Self::ExtendedMegaUltimate),
+            Self::UHV => Ok(Self::UltraHigh),
+            Self::UEV => Ok(Self::UltraExcessive),
+            Self::UIV => Ok(Self::UltraImmense),
+            Self::UXV => Ok(Self::UltraExtreme),
             Self::OP_V => Ok(Self::Overpowered),
             Self::MAX => Ok(Self::Maximum),
             _ => Err(VoltageFromStrError),
