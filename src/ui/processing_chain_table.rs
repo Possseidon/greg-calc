@@ -90,9 +90,12 @@ impl ProcessingChainTable {
                                             _ => &mut tmp_editing_buffer,
                                         };
 
-                                        if let Some(new_action) =
-                                            cell.show(ui, &self.processing_chain, editing_buffer)
-                                        {
+                                        if let Some(new_action) = cell.show(
+                                            ui,
+                                            view_mode,
+                                            &self.processing_chain,
+                                            editing_buffer,
+                                        ) {
                                             action.get_or_insert(new_action);
                                         }
 
@@ -504,12 +507,14 @@ impl TableCell {
     fn show(
         &self,
         ui: &mut Ui,
+        view_mode: ViewMode,
         processing_chain: &ProcessingChain,
         editing_buffer: &mut Option<EditingBuffer>,
     ) -> Option<Action> {
         match self {
             Self::Setup { index, content } => content
                 .show(
+                    view_mode,
                     &processing_chain.setups()[*index],
                     || &processing_chain.weighted_speeds().speeds()[*index],
                     editing_buffer,
@@ -573,13 +578,14 @@ impl SetupTableCellContent {
 
     fn show<'a>(
         &self,
+        view_mode: ViewMode,
         setup: &'a Setup,
         speed: impl FnOnce() -> &'a Rational,
         editing_buffer: &mut Option<EditingBuffer>,
         ui: &mut Ui,
     ) -> Option<SetupAction> {
         match self {
-            Self::Machine => editable_machine(&setup.recipe.machine, editing_buffer, ui),
+            Self::Machine => editable_machine(view_mode, &setup.recipe.machine, editing_buffer, ui),
             Self::Catalyst { index } => editable_product(
                 &setup.recipe.catalysts[*index],
                 editing_buffer,
@@ -805,6 +811,7 @@ fn setup_selector(action: &mut Option<SetupAction>) -> impl FnOnce(&mut Ui) + '_
 }
 
 fn editable_machine(
+    view_mode: ViewMode,
     machine: &Machine,
     editing_buffer: &mut Option<EditingBuffer>,
     ui: &mut Ui,
@@ -858,7 +865,9 @@ fn editable_machine(
                     });
                 }
             });
-            ui.menu_button("📜 Add Setup", setup_selector(&mut action));
+            if view_mode != ViewMode::Recipe {
+                ui.menu_button("📜 Add Setup", setup_selector(&mut action));
+            }
             ui.separator();
             if ui.button("❌ Remove").clicked() {
                 ui.close_menu();
