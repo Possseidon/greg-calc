@@ -487,7 +487,9 @@ impl TableColumn {
             Self::Catalysts | Self::Eu | Self::ConsumedCount | Self::ProducedCount => {
                 Column::auto()
             }
-            _ => Column::auto().resizable(true),
+            _ => Column::auto_with_initial_suggestion(0.0)
+                .resizable(true)
+                .clip(true),
         }
     }
 }
